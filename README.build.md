@@ -98,7 +98,15 @@ Building on Unix:
 
     ```bash
 	$ cmake .. -DCMAKE_BUILD_TYPE=DEBUG
-    ````
+    ```
+
+       **NOTE6**
+       To build on Solaris the linker needs to be informed to use lib socket
+       and libnsl, and only builds in 64bit mode.
+
+    ```bash
+	$ cmake .. -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS="-lsocket -lnsl"
+    ```
 
 4. Finally you can build using the generated Makefile:
 
