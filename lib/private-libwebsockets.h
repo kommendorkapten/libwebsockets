@@ -125,6 +125,8 @@
 #if defined (__ANDROID__)
 #include <syslog.h>
 #include <sys/resource.h>
+#elif defined (__sun)
+#include <syslog.h>
 #else
 #include <sys/syslog.h>
 #endif
@@ -298,6 +300,12 @@ extern "C" {
 	#endif
 #endif
 
+#if defined(__sun) && defined(__GNUC__)
+# define BYTE_ORDER __BYTE_ORDER__
+# define LITTLE_ENDIAN __ORDER_LITTLE_ENDIAN__
+# define BIG_ENDIAN __ORDER_BIG_ENDIAN__
+#endif
+
 #if !defined(BYTE_ORDER)
 # define BYTE_ORDER __BYTE_ORDER
 #endif
@@ -316,6 +324,14 @@ extern "C" {
  */
 #ifdef __APPLE__
 #define MSG_NOSIGNAL SO_NOSIGPIPE
+#endif
+
+/*
+ * Solaris 11.X only supports POSIX 2001, MSG_NOSIGNAL appears in
+ * POSIX 2008.
+ */
+#ifdef __sun
+#define MSG_NOSIGNAL 0
 #endif
 
 #ifdef _WIN32
