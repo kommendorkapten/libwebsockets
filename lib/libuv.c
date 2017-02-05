@@ -47,12 +47,12 @@ lws_uv_idle(uv_idle_t *handle
 	 */
 	if (!lws_service_adjust_timeout(pt->context, 1, pt->tid)) {
 		/* -1 timeout means just do forced service */
-		lws_plat_service_tsi(pt->context, -1, pt->tid);
+		_lws_plat_service_tsi(pt->context, -1, pt->tid);
 		/* still somebody left who wants forced service? */
 		if (!lws_service_adjust_timeout(pt->context, 1, pt->tid))
 			/* yes... come back again later */
 			lwsl_debug("%s: done again\n", __func__);
-			return;
+		return;
 	}
 
 	/* there is nobody who needs service forcing, shut down idle */
@@ -67,7 +67,7 @@ lws_io_cb(uv_poll_t *watcher, int status, int revents)
 	struct lws_io_watcher *lws_io = lws_container_of(watcher,
 					struct lws_io_watcher, uv_watcher);
 	struct lws *wsi = lws_container_of(lws_io, struct lws, w_read);
-	struct lws_context *context = lws_io->context;
+	struct lws_context *context = wsi->context;
 	struct lws_pollfd eventfd;
 
 #if defined(WIN32) || defined(_WIN32)
@@ -141,49 +141,93 @@ lws_uv_timeout_cb(uv_timer_t *timer
 	lws_service_fd_tsi(pt->context, NULL, pt->tid);
 }
 
-static const int sigs[] = { SIGINT, SIGTERM, SIGSEGV, SIGFPE };
+static const int sigs[] = { SIGINT, SIGTERM, SIGSEGV, SIGFPE, SIGHUP };
+
+int
+lws_uv_initvhost(struct lws_vhost* vh, struct lws* wsi)
+{
+	struct lws_context_per_thread *pt;
+	int n;
+
+	if (!LWS_LIBUV_ENABLED(vh->context))
+		return 0;
+	if (!wsi)
+		wsi = vh->lserv_wsi;
+	if (!wsi)
+		return 0;
+	if (wsi->w_read.context)
+		return 0;
+
+	pt = &vh->context->pt[(int)wsi->tsi];
+	if (!pt->io_loop_uv)
+		return 0;
+
+	wsi->w_read.context = vh->context;
+	n = uv_poll_init_socket(pt->io_loop_uv,
+				&wsi->w_read.uv_watcher, wsi->sock);
+	if (n) {
+		lwsl_err("uv_poll_init failed %d, sockfd=%p\n",
+				 n, (void *)(long)wsi->sock);
+
+		return -1;
+	}
+	lws_libuv_io(wsi, LWS_EV_START | LWS_EV_READ);
+
+	return 0;
+}
+
+/*
+ * This needs to be called after vhosts have been defined.
+ *
+ * If later, after server start, another vhost is added, this must be
+ * called again to bind the vhost
+ */
 
 LWS_VISIBLE int
 lws_uv_initloop(struct lws_context *context, uv_loop_t *loop, int tsi)
 {
 	struct lws_context_per_thread *pt = &context->pt[tsi];
 	struct lws_vhost *vh = context->vhost_list;
-	int status = 0, n, ns;
+	int status = 0, n, ns, first = 1;
 
-	if (!loop) {
-		loop = lws_malloc(sizeof(*loop));
+	if (!pt->io_loop_uv) {
 		if (!loop) {
-			lwsl_err("OOM\n");
-			return -1;
+			loop = lws_malloc(sizeof(*loop));
+			if (!loop) {
+				lwsl_err("OOM\n");
+				return -1;
+			}
+	#if UV_VERSION_MAJOR > 0
+			uv_loop_init(loop);
+	#else
+			lwsl_err("This libuv is too old to work...\n");
+			return 1;
+	#endif
+			pt->ev_loop_foreign = 0;
+		} else {
+			lwsl_notice(" Using foreign event loop...\n");
+			pt->ev_loop_foreign = 1;
 		}
-#if UV_VERSION_MAJOR > 0
-		uv_loop_init(loop);
-#else
-		lwsl_err("This libuv is too old to work...\n");
-		return 1;
-#endif
-		pt->ev_loop_foreign = 0;
-	} else {
-		lwsl_notice(" Using foreign event loop...\n");
-		pt->ev_loop_foreign = 1;
-	}
 
-	pt->io_loop_uv = loop;
-	uv_idle_init(loop, &pt->uv_idle);
+		pt->io_loop_uv = loop;
+		uv_idle_init(loop, &pt->uv_idle);
 
-	ns = ARRAY_SIZE(sigs);
-	if (lws_check_opt(context->options, LWS_SERVER_OPTION_UV_NO_SIGSEGV_SIGFPE_SPIN))
-		ns = 2;
+		ns = ARRAY_SIZE(sigs);
+		if (lws_check_opt(context->options,
+				  LWS_SERVER_OPTION_UV_NO_SIGSEGV_SIGFPE_SPIN))
+			ns = 2;
 
-	if (pt->context->use_ev_sigint) {
-		assert(ns <= ARRAY_SIZE(pt->signals));
-		for (n = 0; n < ns; n++) {
-			uv_signal_init(loop, &pt->signals[n]);
-			pt->signals[n].data = pt->context;
-			uv_signal_start(&pt->signals[n],
-					context->lws_uv_sigint_cb, sigs[n]);
+		if (pt->context->use_ev_sigint) {
+			assert(ns <= ARRAY_SIZE(pt->signals));
+			for (n = 0; n < ns; n++) {
+				uv_signal_init(loop, &pt->signals[n]);
+				pt->signals[n].data = pt->context;
+				uv_signal_start(&pt->signals[n],
+						context->lws_uv_sigint_cb, sigs[n]);
+			}
 		}
-	}
+	} else
+		first = 0;
 
 	/*
 	 * Initialize the accept wsi read watcher with all the listening sockets
@@ -193,24 +237,16 @@ lws_uv_initloop(struct lws_context *context, uv_loop_t *loop, int tsi)
 	 * initialized until after context creation.
 	 */
 	while (vh) {
-		if (vh->lserv_wsi) {
-			vh->lserv_wsi->w_read.context = context;
-			n = uv_poll_init_socket(pt->io_loop_uv,
-						&vh->lserv_wsi->w_read.uv_watcher,
-						vh->lserv_wsi->sock);
-			if (n) {
-				lwsl_err("uv_poll_init failed %d, sockfd=%p\n",
-					n, (void *)(long)vh->lserv_wsi->sock);
-
-				return -1;
-			}
-			lws_libuv_io(vh->lserv_wsi, LWS_EV_START | LWS_EV_READ);
-		}
+		if (lws_uv_initvhost(vh, vh->lserv_wsi) == -1)
+			return -1;
 		vh = vh->vhost_next;
 	}
 
-	uv_timer_init(pt->io_loop_uv, &pt->uv_timeout_watcher);
-	uv_timer_start(&pt->uv_timeout_watcher, lws_uv_timeout_cb, 10, 1000);
+	if (first) {
+		uv_timer_init(pt->io_loop_uv, &pt->uv_timeout_watcher);
+		uv_timer_start(&pt->uv_timeout_watcher, lws_uv_timeout_cb,
+			       10, 1000);
+	}
 
 	return status;
 }
@@ -229,6 +265,7 @@ void
 lws_libuv_destroyloop(struct lws_context *context, int tsi)
 {
 	struct lws_context_per_thread *pt = &context->pt[tsi];
+//	struct lws_context *ctx;
 	int m, budget = 100, ns;
 
 	if (!lws_check_opt(context->options, LWS_SERVER_OPTION_LIBUV))
@@ -236,6 +273,8 @@ lws_libuv_destroyloop(struct lws_context *context, int tsi)
 
 	if (!pt->io_loop_uv)
 		return;
+
+	lwsl_notice("%s: closing signals + timers context %p\n", __func__, context);
 
 	if (context->use_ev_sigint) {
 		uv_signal_stop(&pt->w_sigint.uv_watcher);
@@ -256,11 +295,13 @@ lws_libuv_destroyloop(struct lws_context *context, int tsi)
 	uv_idle_stop(&pt->uv_idle);
 	uv_close((uv_handle_t *)&pt->uv_idle, lws_uv_close_cb);
 
+	if (pt->ev_loop_foreign)
+		return;
+
 	while (budget-- && uv_run(pt->io_loop_uv, UV_RUN_NOWAIT))
 		;
 
-	if (pt->ev_loop_foreign)
-		return;
+	lwsl_notice("%s: closing all loop handles context %p\n", __func__, context);
 
 	uv_stop(pt->io_loop_uv);
 
@@ -311,7 +352,9 @@ lws_libuv_io(struct lws *wsi, int flags)
 
 	// lwsl_notice("%s: wsi: %p, flags:0x%x\n", __func__, wsi, flags);
 
-	if (!pt->io_loop_uv) {
+	// w->context is set after the loop is initialized
+
+	if (!pt->io_loop_uv || !w->context) {
 		lwsl_info("%s: no io loop yet\n", __func__);
 		return;
 	}
@@ -366,15 +409,24 @@ lws_libuv_run(const struct lws_context *context, int tsi)
 		uv_run(context->pt[tsi].io_loop_uv, 0);
 }
 
+LWS_VISIBLE void
+lws_libuv_stop_without_kill(const struct lws_context *context, int tsi)
+{
+	if (context->pt[tsi].io_loop_uv && LWS_LIBUV_ENABLED(context))
+		uv_stop(context->pt[tsi].io_loop_uv);
+}
+
 static void
 lws_libuv_kill(const struct lws_context *context)
 {
 	int n;
 
+	lwsl_notice("%s\n", __func__);
+
 	for (n = 0; n < context->count_threads; n++)
 		if (context->pt[n].io_loop_uv &&
-		    LWS_LIBUV_ENABLED(context) &&
-		    !context->pt[n].ev_loop_foreign)
+		    LWS_LIBUV_ENABLED(context) )//&&
+		    //!context->pt[n].ev_loop_foreign)
 			uv_stop(context->pt[n].io_loop_uv);
 }
 
@@ -434,8 +486,24 @@ lws_libuv_closewsi(uv_handle_t* handle)
 	struct lws *n = NULL, *wsi = (struct lws *)(((char *)handle) -
 			  (char *)(&n->w_read.uv_watcher));
 	struct lws_context *context = lws_get_context(wsi);
+	int lspd = 0;
+
+	if (wsi->mode == LWSCM_SERVER_LISTENER &&
+	    wsi->context->deprecated) {
+		lspd = 1;
+		context->deprecation_pending_listen_close_count--;
+		if (!context->deprecation_pending_listen_close_count)
+			lspd = 2;
+	}
 
 	lws_close_free_wsi_final(wsi);
+
+	if (lspd == 2 && context->deprecation_cb) {
+		lwsl_notice("calling deprecation callback\n");
+		context->deprecation_cb();
+	}
+
+	//lwsl_notice("%s: ctx %p: wsi left %d\n", __func__, context, context->count_wsi_allocated);
 
 	if (context->requested_kill && context->count_wsi_allocated == 0)
 		lws_libuv_kill(context);
@@ -457,7 +525,7 @@ lws_libuv_closehandle(struct lws *wsi)
 #if defined(LWS_WITH_PLUGINS) && (UV_VERSION_MAJOR > 0)
 
 LWS_VISIBLE int
-lws_plat_plugins_init(struct lws_context * context, const char * const *d)
+lws_plat_plugins_init(struct lws_context *context, const char * const *d)
 {
 	struct lws_plugin_capability lcaps;
 	struct lws_plugin *plugin;
@@ -492,7 +560,7 @@ lws_plat_plugins_init(struct lws_context * context, const char * const *d)
 
 			lwsl_notice("   %s\n", dent.name);
 
-			snprintf(path, sizeof(path) - 1, "%s/%s", *d, dent.name);
+			lws_snprintf(path, sizeof(path) - 1, "%s/%s", *d, dent.name);
 			if (uv_dlopen(path, &lib)) {
 				uv_dlerror(&lib);
 				lwsl_err("Error loading DSO: %s\n", lib.errmsg);
@@ -500,11 +568,11 @@ lws_plat_plugins_init(struct lws_context * context, const char * const *d)
 			}
 			/* we could open it, can we get his init function? */
 #if !defined(WIN32)
-			m = snprintf(path, sizeof(path) - 1, "init_%s",
+			m = lws_snprintf(path, sizeof(path) - 1, "init_%s",
 				     dent.name + 3 /* snip lib... */);
 			path[m - 3] = '\0'; /* snip the .so */
 #else
-			m = snprintf(path, sizeof(path) - 1, "init_%s",
+			m = lws_snprintf(path, sizeof(path) - 1, "init_%s",
 				     dent.name);
 			path[m - 4] = '\0'; /* snip the .dll */
 #endif
@@ -546,6 +614,7 @@ bail:
 		d++;
 	}
 
+	uv_run(&loop, UV_RUN_NOWAIT);
 	uv_loop_close(&loop);
 
 	return ret;
@@ -553,7 +622,7 @@ bail:
 }
 
 LWS_VISIBLE int
-lws_plat_plugins_destroy(struct lws_context * context)
+lws_plat_plugins_destroy(struct lws_context *context)
 {
 	struct lws_plugin *plugin = context->plugin_list, *p;
 	lws_plugin_destroy_func func;
@@ -569,10 +638,10 @@ lws_plat_plugins_destroy(struct lws_context * context)
 	while (plugin) {
 		p = plugin;
 #if !defined(WIN32)
-		m = snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name + 3);
+		m = lws_snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name + 3);
 		path[m - 3] = '\0';
 #else
-		m = snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name);
+		m = lws_snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name);
 		path[m - 4] = '\0';
 #endif
 

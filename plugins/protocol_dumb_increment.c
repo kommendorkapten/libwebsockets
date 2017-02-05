@@ -88,7 +88,9 @@ callback_dumb_increment(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_PROTOCOL_DESTROY:
 		if (!vhd)
 			break;
+	//	lwsl_notice("di: LWS_CALLBACK_PROTOCOL_DESTROY: v=%p, ctx=%p\n", vhd, vhd->context);
 		uv_timer_stop(&vhd->timeout_watcher);
+		uv_close((uv_handle_t *)&vhd->timeout_watcher, NULL);
 		break;
 
 	case LWS_CALLBACK_ESTABLISHED:
@@ -96,7 +98,7 @@ callback_dumb_increment(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
 	case LWS_CALLBACK_SERVER_WRITEABLE:
-		n = snprintf((char *)p, sizeof(buf) - LWS_PRE, "%d", pss->number++);
+		n = lws_snprintf((char *)p, sizeof(buf) - LWS_PRE, "%d", pss->number++);
 		m = lws_write(wsi, p, n, LWS_WRITE_TEXT);
 		if (m < n) {
 			lwsl_err("ERROR %d writing to di socket\n", n);

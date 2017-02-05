@@ -16,6 +16,9 @@ Just enable -DLWS_WITH_LWSWS=1 at cmake-time.
 
 It enables libuv and plugin support automatically.
 
+NOTICE on Ubuntu, the default libuv package is called "libuv-0.10".  This is ancient.
+
+You should replace this with libuv1 and libuv1-dev before proceeding.
 
 @section lwswsc Lwsws Configuration
 
@@ -76,6 +79,20 @@ on port 7681, non-SSL is provided.  To set it up
 	# sudo lwsws
 ```
 
+@section lwsogo Other Global Options
+
+ - `reject-service-keywords` allows you to return an HTTP error code and message of your choice
+if a keyword is found in the user agent
+
+```
+   "reject-service-keywords": [{
+        "scumbot": "404 Not Found"
+   }]
+```
+
+ - `timeout-secs` lets you set the global timeout for various network-related
+ operations in lws, in seconds.  It defaults to 5.
+ 
 @section lwswsv Lwsws Vhosts
 
 One server can run many vhosts, where SSL is in use SNI is used to match
@@ -356,6 +373,36 @@ If you provide an extra mimetype entry
 Then any file is served, if the mimetype was not known then it is served without a
 Content-Type: header.
 
+7) A mount can be protected by HTTP Basic Auth.  This only makes sense when using
+https, since otherwise the password can be sniffed.
+
+You can add a `basic-auth` entry on a mount like this`
+
+```
+{
+        "mountpoint": "/basic-auth",
+        "origin": "file://_lws_ddir_/libwebsockets-test-server/private",
+        "basic-auth": "/var/www/balogins-private"
+}
+```
+
+Before serving anything, lws will signal to the browser that a username / password
+combination is required, and it will pop up a dialog.  When the user has filled it
+in, lwsws checks the user:password string against the text file named in the `basic-auth`
+entry.
+
+The file should contain user:pass one per line
+
+```
+testuser:testpass
+myuser:hispass
+```
+
+The file should be readable by lwsws, and for a little bit of extra security not
+have a file suffix, so lws would reject to serve it even if it could find it on
+a mount.
+
+
 @section lwswspl Lwsws Plugins
 
 Protcols and extensions may also be provided from "plugins", these are
@@ -407,7 +454,7 @@ Enable the protocol like this on a vhost's ws-protocols section
 	         "update-ms": "5000"
 	       }
 ```
-"update-ms" is used to control how often updated JSON is sent on a ws link.
+`"update-ms"` is used to control how often updated JSON is sent on a ws link.
 
 And map the provided HTML into the vhost in the mounts section
 ```
@@ -418,23 +465,78 @@ And map the provided HTML into the vhost in the mounts section
 	       }
 ```
 You might choose to put it on its own vhost which has "interface": "lo", so it's not
-externally visible.
+externally visible, or use the Basic Auth support to require authentication to
+access it.
 
+`"hide-vhosts": "{0 | 1}"` lets you control if information about your vhosts is included.
+Since this includes mounts, you might not want to leak that information, mount names,
+etc.
+
+`"filespath":"{path}"` lets you give a server filepath which is read and sent to the browser
+on each refresh.  For example, you can provide server temperature information on most
+Linux systems by giving an appropriate path down /sys.
+
+This may be given multiple times.
+
+
+@section lwswsreload Lwsws Configuration Reload
+
+You may send lwsws a `HUP` signal, by, eg
+
+```
+$ sudo killall -HUP lwsws
+```
+
+This causes lwsws to "deprecate" the existing lwsws process, and remove and close all of
+its listen sockets, but otherwise allowing it to continue to run, until all
+of its open connections close.
+
+When a deprecated lwsws process has no open connections left, it is destroyed
+automatically.
+
+After sending the SIGHUP to the main lwsws process, a new lwsws process, which can
+pick up the newly-available listen sockets, and use the current configuration
+files, is automatically started.
+
+The new configuration may differ from the original one in arbitrary ways, the new
+context is created from scratch each time without reference to the original one.
+
+Notes
+
+1) Protocols that provide a "shared world" like mirror will have as many "worlds"
+as there are lwsws processes still active.  People connected to a deprecated lwsws
+process remain connected to the existing peers.
+
+But any new connections will apply to the new lwsws process, which does not share
+per-vhost "shared world" data with the deprecated process.  That means no new
+connections on the deprecated context, ie a "shrinking world" for those guys, and a
+"growing world" for people who connect after the SIGHUP.
+
+2) The new lwsws process owes nothing to the previous one.  It starts with fresh
+plugins, fresh configuration, fresh root privileges if that how you start it.
+
+The plugins may have been updated in arbitrary ways including struct size changes
+etc, and lwsws or lws may also have been updated arbitrarily.
+
+3) A root parent process is left up that is not able to do anything except
+respond to SIGHUP or SIGTERM.  Actual serving and network listening etc happens
+in child processes which use the privileges set in the lwsws config files.
 
 @section lwswssysd Lwsws Integration with Systemd
 
 lwsws needs a service file like this as `/usr/lib/systemd/system/lwsws.service`
 ```
-	[Unit]
-	Description=Libwebsockets Web Server
-	After=syslog.target
-	
-	[Service]
-	ExecStart=/usr/local/bin/lwsws
-	StandardError=null
-	
-	[Install]
-	WantedBy=multi-user.target
+[Unit]
+Description=Libwebsockets Web Server
+After=syslog.target
+
+[Service]
+ExecStart=/usr/local/bin/lwsws 
+ExecReload=/usr/bin/killall -s SIGHUP lwsws ; sleep 1 ; /usr/local/bin/lwsws
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 You can find this prepared in `./lwsws/usr-lib-systemd-system-lwsws.service`

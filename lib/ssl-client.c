@@ -29,6 +29,64 @@ lws_ssl_bind_passphrase(SSL_CTX *ssl_ctx, struct lws_context_creation_info *info
 
 extern int lws_ssl_get_error(struct lws *wsi, int n);
 
+#if defined(LWS_USE_POLARSSL)
+#else
+#if defined(LWS_USE_MBEDTLS)
+#else
+#ifdef USE_WOLFSSL
+#else
+
+static int
+OpenSSL_client_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
+{
+	SSL *ssl;
+	int n;
+	struct lws *wsi;
+
+	/* keep old behaviour accepting self-signed server certs */
+	if (!preverify_ok) {
+		int err = X509_STORE_CTX_get_error(x509_ctx);
+
+		if (err != X509_V_OK) {
+			ssl = X509_STORE_CTX_get_ex_data(x509_ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+			wsi = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+
+			if ((err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
+					err == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) &&
+					wsi->use_ssl & LCCSCF_ALLOW_SELFSIGNED) {
+				lwsl_notice("accepting self-signed certificate\n");
+				X509_STORE_CTX_set_error(x509_ctx, X509_V_OK);
+				return 1;	// ok
+			}
+		}
+	}
+
+	ssl = X509_STORE_CTX_get_ex_data(x509_ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+	wsi = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+
+	n = lws_get_context_protocol(wsi->context, 0).callback(wsi, LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION, x509_ctx, ssl, preverify_ok);
+
+	/* keep old behaviour if something wrong with server certs */
+	/* if ssl error is overruled in callback and cert is ok,
+	 * X509_STORE_CTX_set_error(x509_ctx, X509_V_OK); must be set and
+	 * return value is 0 from callback */
+	if (!preverify_ok) {
+		int err = X509_STORE_CTX_get_error(x509_ctx);
+
+		if (err != X509_V_OK) {	/* cert validation error was not handled in callback */
+			int depth = X509_STORE_CTX_get_error_depth(x509_ctx);
+			const char* msg = X509_verify_cert_error_string(err);
+			lwsl_err("SSL error: %s (preverify_ok=%d;err=%d;depth=%d)\n", msg, preverify_ok, err, depth);
+			return preverify_ok;	// not ok
+		}
+	}
+	/* convert callback return code from 0 = OK to verify callback return value 1 = OK */
+	return !n;
+}
+#endif
+#endif
+#endif
+
 int
 lws_ssl_client_bio_create(struct lws *wsi)
 {
@@ -37,12 +95,27 @@ lws_ssl_client_bio_create(struct lws *wsi)
 #else
 #if defined(LWS_USE_MBEDTLS)
 #else
-	struct lws_context *context = wsi->context;
-	const char *hostname = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_HOST);
-	X509_VERIFY_PARAM *param;
+	char hostname[128], *p;
 
-	(void)hostname;
-	(void)param;
+	if (lws_hdr_copy(wsi, hostname, sizeof(hostname),
+			 _WSI_TOKEN_CLIENT_HOST) <= 0) {
+		lwsl_err("%s: Unable to get hostname\n", __func__);
+
+		return -1;
+	}
+
+	/*
+	 * remove any :port part on the hostname... necessary for network
+	 * connection but typical certificates do not contain it
+	 */
+	p = hostname;
+	while (*p) {
+		if (*p == ':') {
+			*p = '\0';
+			break;
+		}
+		p++;
+	}
 
 	wsi->ssl = SSL_new(wsi->vhost->ssl_client_ctx);
 	if (!wsi->ssl) {
@@ -53,16 +126,20 @@ lws_ssl_client_bio_create(struct lws *wsi)
 	}
 
 #if defined LWS_HAVE_X509_VERIFY_PARAM_set1_host
+	X509_VERIFY_PARAM *param;
+	(void)param;
+
 	if (!(wsi->use_ssl & LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK)) {
 		param = SSL_get0_param(wsi->ssl);
 		/* Enable automatic hostname checks */
 		X509_VERIFY_PARAM_set_hostflags(param,
 						X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 		X509_VERIFY_PARAM_set1_host(param, hostname, 0);
-		/* Configure a non-zero callback if desired */
-		SSL_set_verify(wsi->ssl, SSL_VERIFY_PEER, 0);
 	}
+
 #endif
+	/* OpenSSL_client_verify_callback will be called @ SSL_connect() */
+	SSL_set_verify(wsi->ssl, SSL_VERIFY_PEER, OpenSSL_client_verify_callback);
 
 #ifndef USE_WOLFSSL
 	SSL_set_mode(wsi->ssl,  SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
@@ -118,7 +195,7 @@ lws_ssl_client_bio_create(struct lws *wsi)
 #endif
 
 	SSL_set_ex_data(wsi->ssl, openssl_websocket_private_data_index,
-			context);
+			wsi);
 
 	return 0;
 #endif
@@ -139,6 +216,7 @@ lws_ssl_client_connect1(struct lws *wsi)
 	n = SSL_connect(wsi->ssl);
 #endif
 #endif
+
 	lws_latency(context, wsi,
 	  "SSL_connect LWSCM_WSCL_ISSUE_HANDSHAKE", n, n > 0);
 
@@ -168,6 +246,17 @@ some_wait:
 
 			return 0; /* no error */
 		}
+
+		{
+			struct lws_context_per_thread *pt = &context->pt[(int)wsi->tsi];
+			char *p = (char *)&pt->serv_buf[0];
+			char *sb = p;
+
+			lwsl_err("ssl hs1 error, X509_V_ERR = %d: %s\n",
+				 n, ERR_error_string(n, sb));
+			lws_ssl_elaborate_error();
+		}
+
 		n = -1;
 	}
 
@@ -221,6 +310,8 @@ lws_ssl_client_connect2(struct lws *wsi)
 		n = SSL_connect(wsi->ssl);
 #endif
 #endif
+		lwsl_notice("%s: SSL_connect says %d\n", __func__, n);
+
 		lws_latency(context, wsi,
 			    "SSL_connect LWSCM_WSCL_WAITING_SSL", n, n > 0);
 
@@ -228,6 +319,8 @@ lws_ssl_client_connect2(struct lws *wsi)
 			n = lws_ssl_get_error(wsi, n);
 
 			if (n == SSL_ERROR_WANT_READ) {
+				lwsl_info("SSL_connect WANT_READ... retrying\n");
+
 				wsi->mode = LWSCM_WSCL_WAITING_SSL;
 
 				return 0; /* no error */
@@ -253,6 +346,7 @@ lws_ssl_client_connect2(struct lws *wsi)
 
 				return 0; /* no error */
 			}
+
 			n = -1;
 		}
 
@@ -295,6 +389,12 @@ lws_ssl_client_connect2(struct lws *wsi)
 		     n == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) &&
 		     wsi->use_ssl & LCCSCF_ALLOW_SELFSIGNED) {
 			lwsl_notice("accepting self-signed certificate\n");
+		} else if ((n == X509_V_ERR_CERT_NOT_YET_VALID ||
+		            n == X509_V_ERR_CERT_HAS_EXPIRED) &&
+		     wsi->use_ssl & LCCSCF_ALLOW_EXPIRED) {
+			lwsl_notice("accepting expired certificate\n");
+		} else if (n == X509_V_ERR_CERT_NOT_YET_VALID) {
+			lwsl_notice("Cert is from the future... probably our clock... accepting...\n");
 		} else {
 			lwsl_err("server's cert didn't look good, X509_V_ERR = %d: %s\n",
 				 n, ERR_error_string(n, sb));
@@ -302,6 +402,7 @@ lws_ssl_client_connect2(struct lws *wsi)
 			return -1;
 		}
 	}
+
 #endif /* USE_WOLFSSL */
 #endif
 #endif
@@ -386,11 +487,13 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 	} else
 		if (!SSL_CTX_load_verify_locations(
 			vhost->ssl_client_ctx, info->ssl_ca_filepath,
-							  NULL))
+							  NULL)) {
 			lwsl_err(
 				"Unable to load SSL Client certs "
 				"file from %s -- client ssl isn't "
 				"going to work", info->ssl_ca_filepath);
+			lws_ssl_elaborate_error();
+		}
 		else
 			lwsl_info("loaded ssl_ca_filepath\n");
 
@@ -401,29 +504,31 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 
 	/* support for client-side certificate authentication */
 	if (info->ssl_cert_filepath) {
+	lwsl_notice("%s: doing cert filepath\n", __func__);
 		n = SSL_CTX_use_certificate_chain_file(vhost->ssl_client_ctx,
 						       info->ssl_cert_filepath);
-		if (n != 1) {
-			lwsl_err("problem getting cert '%s' %lu: %s\n",
-				info->ssl_cert_filepath,
-				ERR_get_error(),
-				ERR_error_string(ERR_get_error(),
-				(char *)vhost->context->pt[0].serv_buf));
+		if (n < 1) {
+			lwsl_err("problem %d getting cert '%s'\n", n,
+				info->ssl_cert_filepath);
+			lws_ssl_elaborate_error();
 			return 1;
 		}
+		lwsl_notice("Loaded client cert %s\n", info->ssl_cert_filepath);
 	}
+
 	if (info->ssl_private_key_filepath) {
+		lwsl_notice("%s: doing private key filepath\n", __func__);
 		lws_ssl_bind_passphrase(vhost->ssl_client_ctx, info);
 		/* set the private key from KeyFile */
 		if (SSL_CTX_use_PrivateKey_file(vhost->ssl_client_ctx,
 		    info->ssl_private_key_filepath, SSL_FILETYPE_PEM) != 1) {
-			lwsl_err("use_PrivateKey_file '%s' %lu: %s\n",
-				info->ssl_private_key_filepath,
-				ERR_get_error(),
-				ERR_error_string(ERR_get_error(),
-				      (char *)vhost->context->pt[0].serv_buf));
+			lwsl_err("use_PrivateKey_file '%s'\n",
+				info->ssl_private_key_filepath);
+			lws_ssl_elaborate_error();
 			return 1;
 		}
+		lwsl_notice("Loaded client cert private key %s\n",
+			    info->ssl_private_key_filepath);
 
 		/* verify private key */
 		if (!SSL_CTX_check_private_key(vhost->ssl_client_ctx)) {

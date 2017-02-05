@@ -366,10 +366,10 @@ lws_service_timeout_check(struct lws *wsi, unsigned int sec)
 
 		/* no need to log normal idle keepalive timeout */
 		if (wsi->pending_timeout != PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE)
-			lwsl_notice("wsi %p: TIMEDOUT WAITING on %d (did hdr %d, ah %p, wl %d, pfd events %d)\n",
+			lwsl_notice("wsi %p: TIMEDOUT WAITING on %d (did hdr %d, ah %p, wl %d, pfd events %d) %llu vs %llu\n",
 			    (void *)wsi, wsi->pending_timeout,
 			    wsi->hdr_parsing_completed, wsi->u.hdr.ah,
-			    pt->ah_wait_list_length, n);
+			    pt->ah_wait_list_length, n, (unsigned long long)sec, (unsigned long long)wsi->pending_timeout_limit);
 //#endif
 		/*
 		 * Since he failed a timeout, he already had a chance to do
@@ -417,7 +417,7 @@ int lws_rxflow_cache(struct lws *wsi, unsigned char *buf, int n, int len)
  * activity in poll() when we have something that already needs service
  */
 
-int
+LWS_VISIBLE LWS_EXTERN int
 lws_service_adjust_timeout(struct lws_context *context, int timeout_ms, int tsi)
 {
 	struct lws_context_per_thread *pt = &context->pt[tsi];
@@ -540,21 +540,22 @@ lws_http_client_read(struct lws *wsi, char **buf, int *len)
 {
 	int rlen, n;
 
-
-
 	rlen = lws_ssl_capable_read(wsi, (unsigned char *)*buf, *len);
-	if (rlen < 0)
-		return -1;
-
-	*len = rlen;
-	if (rlen == 0)
-		return 0;
-
-//	lwsl_err("%s: read %d\n", __func__, rlen);
+	*len = 0;
 
 	/* allow the source to signal he has data again next time */
-	wsi->client_rx_avail = 0;
 	lws_change_pollfd(wsi, 0, LWS_POLLIN);
+
+	if (rlen == LWS_SSL_CAPABLE_ERROR) {
+		lwsl_notice("%s: SSL capable error\n", __func__);
+		return -1;
+	}
+
+	if (rlen <= 0)
+		return 0;
+
+	*len = rlen;
+	wsi->client_rx_avail = 0;
 
 	/*
 	 * server may insist on transfer-encoding: chunked,
@@ -569,14 +570,18 @@ spin_chunks:
 				break;
 			}
 			n = char_to_hex((*buf)[0]);
-			if (n < 0)
+			if (n < 0) {
+				lwsl_debug("chunking failure\n");
 				return -1;
+			}
 			wsi->chunk_remaining <<= 4;
 			wsi->chunk_remaining |= n;
 			break;
 		case ELCP_CR:
-			if ((*buf)[0] != '\x0a')
+			if ((*buf)[0] != '\x0a') {
+				lwsl_debug("chunking failure\n");
 				return -1;
+			}
 			wsi->chunk_parser = ELCP_CONTENT;
 			lwsl_info("chunk %d\n", wsi->chunk_remaining);
 			if (wsi->chunk_remaining)
@@ -588,8 +593,11 @@ spin_chunks:
 			break;
 
 		case ELCP_POST_CR:
-			if ((*buf)[0] != '\x0d')
+			if ((*buf)[0] != '\x0d') {
+				lwsl_debug("chunking failure\n");
+
 				return -1;
+			}
 
 			wsi->chunk_parser = ELCP_POST_LF;
 			break;
@@ -627,8 +635,11 @@ spin_chunks:
 #endif
 		if (user_callback_handle_rxflow(wsi->protocol->callback,
 				wsi, LWS_CALLBACK_RECEIVE_CLIENT_HTTP_READ,
-				wsi->user_space, *buf, n))
+				wsi->user_space, *buf, n)) {
+			lwsl_debug("%s: LWS_CALLBACK_RECEIVE_CLIENT_HTTP_READ returned -1\n", __func__);
+
 			return -1;
+		}
 
 	if (wsi->chunked && wsi->chunk_remaining) {
 		(*buf) += n;
@@ -653,11 +664,15 @@ spin_chunks:
 completed:
 	if (user_callback_handle_rxflow(wsi->protocol->callback,
 			wsi, LWS_CALLBACK_COMPLETED_CLIENT_HTTP,
-			wsi->user_space, NULL, 0))
+			wsi->user_space, NULL, 0)) {
+		lwsl_debug("Completed call returned -1\n");
 		return -1;
+	}
 
-	if (lws_http_transaction_completed_client(wsi))
+	if (lws_http_transaction_completed_client(wsi)) {
+		lwsl_notice("%s: transaction completed says -1\n", __func__);
 		return -1;
+	}
 
 	return 0;
 }
@@ -680,12 +695,6 @@ lws_service_fd_tsi(struct lws_context *context, struct lws_pollfd *pollfd, int t
 	if (!context->protocol_init_done)
 		lws_protocol_init(context);
 
-	/*
-	 * you can call us with pollfd = NULL to just allow the once-per-second
-	 * global timeout checks; if less than a second since the last check
-	 * it returns immediately then.
-	 */
-
 	time(&now);
 
 	/*
@@ -701,6 +710,16 @@ lws_service_fd_tsi(struct lws_context *context, struct lws_pollfd *pollfd, int t
 
 		lws_plat_service_periodic(context);
 
+		/* retire unused deprecated context */
+#ifndef LWS_PLAT_OPTEE
+#if LWS_POSIX && !defined(_WIN32)
+		if (context->deprecated && !context->count_wsi_allocated) {
+			lwsl_notice("%s: ending deprecated context\n", __func__);
+			kill(getpid(), SIGINT);
+			return 0;
+		}
+#endif
+#endif
 		/* global timeout check once per second */
 
 		if (pollfd)
@@ -743,9 +762,9 @@ lws_service_fd_tsi(struct lws_context *context, struct lws_pollfd *pollfd, int t
 
 	if (context->ws_ping_pong_interval &&
 	    context->last_ws_ping_pong_check_s < now + 10) {
+		struct lws_vhost *vh = context->vhost_list;
 		context->last_ws_ping_pong_check_s = now;
 
-		struct lws_vhost *vh = context->vhost_list;
 		while (vh) {
 			for (n = 0; n < vh->count_protocols; n++) {
 				wsi = vh->same_vh_protocol_list[n];
@@ -972,6 +991,13 @@ drain:
 		    !wsi->told_user_closed) {
 
 			/*
+			 * In SSL mode we get POLLIN notification about
+			 * encrypted data in.
+			 *
+			 * But that is not necessarily related to decrypted
+			 * data out becoming available; in may need to perform
+			 * other in or out before that happens.
+			 *
 			 * simply mark ourselves as having readable data
 			 * and turn off our POLLIN
 			 */
@@ -979,13 +1005,15 @@ drain:
 			lws_change_pollfd(wsi, LWS_POLLIN, 0);
 
 			/* let user code know, he'll usually ask for writeable
-			 * callback and drain / reenable it there
+			 * callback and drain / re-enable it there
 			 */
 			if (user_callback_handle_rxflow(
 					wsi->protocol->callback,
 					wsi, LWS_CALLBACK_RECEIVE_CLIENT_HTTP,
-					wsi->user_space, NULL, 0))
+					wsi->user_space, NULL, 0)) {
+				lwsl_debug("LWS_CALLBACK_RECEIVE_CLIENT_HTTP closed it\n");
 				goto close_and_handled;
+			}
 		}
 #endif
 		/*
@@ -1105,8 +1133,10 @@ drain:
 		break;
 #else
 		if ((pollfd->revents & LWS_POLLOUT) &&
-		    lws_handle_POLLOUT_event(wsi, pollfd))
+		    lws_handle_POLLOUT_event(wsi, pollfd)) {
+			lwsl_debug("POLLOUT event closed it\n");
 			goto close_and_handled;
+		}
 
 		n = lws_client_socket_service(context, wsi, pollfd);
 		if (n)
@@ -1148,6 +1178,6 @@ lws_service(struct lws_context *context, int timeout_ms)
 LWS_VISIBLE int
 lws_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 {
-	return lws_plat_service_tsi(context, timeout_ms, tsi);
+	return _lws_plat_service_tsi(context, timeout_ms, tsi);
 }
 

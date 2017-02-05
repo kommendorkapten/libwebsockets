@@ -346,7 +346,12 @@ static void
 strtolower(char *s)
 {
 	while (*s) {
+#ifdef LWS_PLAT_OPTEE
+		int tolower_optee(int c);
+		*s = tolower_optee((int)*s);
+#else
 		*s = tolower((int)*s);
+#endif
 		s++;
 	}
 }
@@ -387,6 +392,15 @@ lws_http_transaction_completed_client(struct lws *wsi)
 	return 0;
 }
 
+LWS_VISIBLE LWS_EXTERN unsigned int
+lws_http_client_http_response(struct lws *wsi)
+{
+	if (!wsi->u.http.ah)
+		return 0;
+
+	return wsi->u.http.ah->http_response;
+}
+
 int
 lws_client_interpret_server_handshake(struct lws *wsi)
 {
@@ -394,7 +408,7 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 	int close_reason = LWS_CLOSE_STATUS_PROTOCOL_ERR;
 	struct lws_context *context = wsi->context;
 	const char *pc, *prot, *ads = NULL, *path, *cce = NULL;
-	struct allocated_headers *ah;
+	struct allocated_headers *ah = NULL;
 	char *p;
 #ifndef LWS_NO_EXTENSIONS
 	struct lws_context_per_thread *pt = &context->pt[(int)wsi->tsi];
@@ -415,6 +429,7 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		lws_union_transition(wsi, LWSCM_HTTP_CLIENT_ACCEPTED);
 		wsi->state = LWSS_CLIENT_HTTP_ESTABLISHED;
 		wsi->u.http.ah = ah;
+		ah->http_response = 0;
 	}
 
 	/*
@@ -450,6 +465,9 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		goto bail3;
 	}
 	n = atoi(p);
+	if (ah)
+		ah->http_response = n;
+
 	if (n == 301 || n == 302 || n == 303 || n == 307 || n == 308) {
 		p = lws_hdr_simple_ptr(wsi, WSI_TOKEN_HTTP_LOCATION);
 		if (!p) {
@@ -474,9 +492,9 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 	}
 
 	if (!wsi->do_ws) {
-		if (n != 200) {
-			lwsl_notice("Connection failed with code %d", n);
-			cce = "HS: Server did not return 200";
+		if (n != 200 && n != 304) {
+			lwsl_notice("Connection failed with code %d\n", n);
+			cce = "HS: Server did not return 200 or 304";
 			goto bail2;
 		}
 
@@ -608,6 +626,7 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		 * no protocol name to work from,
 		 * default to first protocol
 		 */
+		n = 0;
 		wsi->protocol = &wsi->vhost->protocols[0];
 		goto check_extensions;
 	}
@@ -652,7 +671,7 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		goto bail2;
 	}
 
-
+check_extensions:
 	/*
 	 * stitch protocol choice into the vh protocol linked list
 	 * We always insert ourselves at the start of the list
@@ -676,7 +695,6 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		wsi->same_vh_protocol_next->same_vh_protocol_prev =
 				&wsi->same_vh_protocol_next;
 
-check_extensions:
 #ifndef LWS_NO_EXTENSIONS
 	/* instantiate the accepted extensions */
 
@@ -992,9 +1010,14 @@ lws_generate_client_handshake(struct lws *wsi, char *pkt)
 	p += sprintf(p, "Host: %s\x0d\x0a",
 		     lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_HOST));
 
-	if (lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN))
-		p += sprintf(p, "Origin: http://%s\x0d\x0a",
-			     lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN));
+	if (lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN)) {
+		if (lws_check_opt(context->options, LWS_SERVER_OPTION_JUST_USE_RAW_ORIGIN))
+			p += sprintf(p, "Origin: %s\x0d\x0a",
+				     lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN));
+		else
+			p += sprintf(p, "Origin: http://%s\x0d\x0a",
+				     lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN));
+	}
 
 	if (wsi->do_ws) {
 		p += sprintf(p, "Upgrade: websocket\x0d\x0a"

@@ -13,7 +13,7 @@ create elaborate clean scripts to get a clean source tree, instead you
 simply remove your build directory.
 
 Libwebsockets has been tested to build successfully on the following platforms
-with SSL support (both OpenSSL/wolfSSL):
+with SSL support (for OpenSSL/wolfSSL/BoringSSL):
 
 - Windows (Visual Studio)
 - Windows (MinGW)
@@ -99,6 +99,20 @@ compiled in, use
 ```
 	$ cmake .. -DCMAKE_BUILD_TYPE=DEBUG
 ```
+
+**NOTE6**
+To build on Solaris the linker needs to be informed to use lib socket
+and libnsl, and only builds in 64bit mode.
+
+```bash
+	$ cmake .. -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS="-lsocket -lnsl"
+```
+
+4. Finally you can build using the generated Makefile:
+
+```bash
+	$ make
+ ```
 
 @section cmq Quirk of cmake
 
@@ -251,15 +265,25 @@ and cd into it
 
 8) yotta build
 
+@section optee Building for OP-TEE
+
+OP-TEE is a "Secure World" Trusted Execution Environment.
+
+Although lws is only part of the necessary picture to have an https-enabled
+TA, it does support OP-TEE as a platform and if you provide the other
+pieces, does work very well.
+
+Select it in cmake with `-DLWS_PLAT_OPTEE=1`
+
+
 @section cmco Setting compile options
 
-
 To set compile time flags you can either use one of the CMake gui applications
-or do it via command line.
+or do it via the command line.
 
 @subsection cmcocl Command line
 
-To list avaialable options (omit the H if you don't want the help text):
+To list available options (omit the H if you don't want the help text):
 
 	cmake -LH ..
 

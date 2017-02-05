@@ -125,7 +125,7 @@ struct sockaddr_in;
 // Visual studio older than 2015 and WIN_CE has only _stricmp
 #if (defined(_MSC_VER) && _MSC_VER < 1900) || defined(_WIN32_WCE)
 #define strcasecmp _stricmp
-#else
+#elif !defined(__MINGW32__)
 #define strcasecmp stricmp
 #endif
 #define getdtablesize() 30000
@@ -148,8 +148,8 @@ struct sockaddr_in;
 #define LWS_INVALID_FILE INVALID_HANDLE_VALUE
 #define LWS_O_RDONLY _O_RDONLY
 
-#if !defined(_MSC_VER) || _MSC_VER < 1900 /* Visual Studio 2015 already defines this in <stdio.h> */
-#define snprintf _snprintf
+#if !defined(__MINGW32__) && (!defined(_MSC_VER) || _MSC_VER < 1900) /* Visual Studio 2015 already defines this in <stdio.h> */
+#define lws_snprintf _snprintf
 #endif
 
 #ifndef __func__
@@ -166,7 +166,7 @@ struct sockaddr_in;
 #define LWS_INLINE inline
 #define LWS_O_RDONLY O_RDONLY
 
-#if !defined(MBED_OPERATORS) && !defined(LWS_WITH_ESP8266)
+#if !defined(MBED_OPERATORS) && !defined(LWS_WITH_ESP8266) && !defined(OPTEE_TA)
 #include <poll.h>
 #include <netdb.h>
 #define LWS_INVALID_FILE -1
@@ -204,6 +204,9 @@ struct sockaddr_in;
 #endif /* LWS_USE_LIBEV */
 #ifdef LWS_USE_LIBUV
 #include <uv.h>
+#ifdef LWS_HAVE_UV_VERSION_H
+#include <uv-version.h>
+#endif
 #endif /* LWS_USE_LIBUV */
 
 #ifndef LWS_EXTERN
@@ -213,8 +216,10 @@ struct sockaddr_in;
 #ifdef _WIN32
 #define random rand
 #else
+#if !defined(OPTEE_TA)
 #include <sys/time.h>
 #include <unistd.h>
+#endif
 #endif
 
 #ifdef LWS_OPENSSL_SUPPORT
@@ -250,6 +255,7 @@ typedef ssl_context SSL;
 
 
 #define CONTEXT_PORT_NO_LISTEN -1
+#define CONTEXT_PORT_NO_LISTEN_SERVER -2
 
 /** \defgroup log Logging
  *
@@ -274,8 +280,9 @@ enum lws_log_levels {
 	LLL_EXT = 1 << 7,
 	LLL_CLIENT = 1 << 8,
 	LLL_LATENCY = 1 << 9,
+	LLL_USER = 1 << 10,
 
-	LLL_COUNT = 10 /* set to count of valid flags */
+	LLL_COUNT = 11 /* set to count of valid flags */
 };
 
 LWS_VISIBLE LWS_EXTERN void _lws_log(int filter, const char *format, ...);
@@ -292,15 +299,18 @@ LWS_VISIBLE LWS_EXTERN void _lws_logv(int filter, const char *format, va_list vl
 LWS_VISIBLE LWS_EXTERN int
 lwsl_timestamp(int level, char *p, int len);
 
+/* these guys are unconditionally included */
+
 #define lwsl_err(...) _lws_log(LLL_ERR, __VA_ARGS__)
+#define lwsl_user(...) _lws_log(LLL_USER, __VA_ARGS__)
 
 #if !defined(LWS_WITH_NO_LOGS)
-/* notice, warn and log are always compiled in */
+/* notice and warn are usually included by being compiled in */
 #define lwsl_warn(...) _lws_log(LLL_WARN, __VA_ARGS__)
 #define lwsl_notice(...) _lws_log(LLL_NOTICE, __VA_ARGS__)
 #endif
 /*
- *  weaker logging can be deselected at configure time using --disable-debug
+ *  weaker logging can be deselected by telling CMake to build in RELEASE mode
  *  that gets rid of the overhead of checking while keeping _warn and _err
  *  active
  */
@@ -312,7 +322,6 @@ lwsl_timestamp(int level, char *p, int len);
 #ifdef _DEBUG
 #if defined(LWS_WITH_NO_LOGS)
 /* notice, warn and log are always compiled in */
-//#define lwsl_err(...) _lws_log(LLL_ERR, __VA_ARGS__)
 #define lwsl_warn(...) _lws_log(LLL_WARN, __VA_ARGS__)
 #define lwsl_notice(...) _lws_log(LLL_NOTICE, __VA_ARGS__)
 #endif
@@ -333,7 +342,6 @@ LWS_VISIBLE LWS_EXTERN void lwsl_hexdump(void *buf, size_t len);
 
 #else /* no debug */
 #if defined(LWS_WITH_NO_LOGS)
-//#define lwsl_err(...) do {} while(0)
 #define lwsl_warn(...) do {} while(0)
 #define lwsl_notice(...) do {} while(0)
 #endif
@@ -1012,6 +1020,36 @@ enum lws_callback_reasons {
 	 * From this callback, when you have sent everything, you should let
 	 * lws know by calling lws_client_http_body_pending(wsi, 0)
 	 */
+	LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION = 58,
+	/**< Similar to LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION
+	 * this callback is called during OpenSSL verification of the cert
+	 * sent from the server to the client. It is sent to protocol[0]
+	 * callback as no protocol has been negotiated on the connection yet.
+	 * Notice that the wsi is set because lws_client_connect_via_info was
+	 * successful.
+	 *
+	 * See http://www.openssl.org/docs/ssl/SSL_CTX_set_verify.html
+	 * to understand more detail about the OpenSSL callback that
+	 * generates this libwebsockets callback and the meanings of the
+	 * arguments passed. In this callback, user is the x509_ctx,
+	 * in is the ssl pointer and len is preverify_ok.
+	 *
+	 * THIS IS NOT RECOMMENDED BUT if a cert validation error shall be
+	 * overruled and cert shall be accepted as ok,
+	 * X509_STORE_CTX_set_error((X509_STORE_CTX*)user, X509_V_OK); must be
+	 * called and return value must be 0 to mean the cert is OK;
+	 * returning 1 will fail the cert in any case.
+	 *
+	 * This also means that if you don't handle this callback then
+	 * the default callback action of returning 0 will not accept the
+	 * certificate in case of a validation error decided by the SSL lib.
+	 *
+	 * This is expected and secure behaviour when validating certificates.
+	 *
+	 * Note: LCCSCF_ALLOW_SELFSIGNED and
+	 * LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK still work without this
+	 * callback being implemented.
+	 */
 
 	/****** add new things just above ---^ ******/
 
@@ -1214,7 +1252,7 @@ lws_set_extension_option(struct lws *wsi, const char *ext_name,
  * client and server for how to do.
  */
 static LWS_INLINE LWS_WARN_DEPRECATED const struct lws_extension *
-lws_get_internal_extensions() { return NULL; }
+lws_get_internal_extensions(void) { return NULL; }
 
 /**
  * lws_ext_parse_options() - deal with parsing negotiated extension options
@@ -1540,6 +1578,13 @@ enum lws_context_options {
 	 * even if it happened without a debugger in place.  You can disable
 	 * that by giving this option.
 	 */
+	LWS_SERVER_OPTION_JUST_USE_RAW_ORIGIN			= (1 << 19),
+	/**< For backwards-compatibility reasons, by default
+	 * lws prepends "http://" to the origin you give in the client
+	 * connection info struct.  If you give this flag when you create
+	 * the context, only the string you give in the client connect
+	 * info for .origin (if any) will be used directly.
+	 */
 
 	/****** add new things just above ---^ ******/
 };
@@ -1557,10 +1602,10 @@ enum lws_context_options {
  */
 struct lws_context_creation_info {
 	int port;
-	/**< VHOST: Port to listen on... you can use CONTEXT_PORT_NO_LISTEN to
-	 * suppress listening on any port, that's what you want if you are
-	 * not running a websocket server at all but just using it as a
-	 * client */
+	/**< VHOST: Port to listen on. Use CONTEXT_PORT_NO_LISTEN to suppress
+	 * listening for a client. Use CONTEXT_PORT_NO_LISTEN_SERVER if you are
+	 * writing a server but you are using \ref sock-adopt instead of the
+	 * built-in listener */
 	const char *iface;
 	/**< VHOST: NULL to bind the listen socket to all interfaces, or the
 	 * interface name, eg, "eth2"
@@ -1705,6 +1750,21 @@ struct lws_context_creation_info {
 		/**< VHOST: pointer to optional linked list of per-vhost
 		 * canned headers that are added to server responses */
 
+	const struct lws_protocol_vhost_options *reject_service_keywords;
+	/**< CONTEXT: Optional list of keywords and rejection codes + text.
+	 *
+	 * The keywords are checked for existing in the user agent string.
+	 *
+	 * Eg, "badrobot" "404 Not Found"
+	 */
+	void *external_baggage_free_on_destroy;
+	/**< CONTEXT: NULL, or pointer to something externally malloc'd, that
+	 * should be freed when the context is destroyed.  This allows you to
+	 * automatically sync the freeing action to the context destruction
+	 * action, so there is no need for an external free() if the context
+	 * succeeded to create.
+	 */
+
 	/* Add new things just above here ---^
 	 * This is part of the ABI, don't needlessly break compatibility
 	 *
@@ -1741,7 +1801,7 @@ struct lws_context_creation_info {
  *
  *	HTTP requests are sent always to the FIRST protocol in protocol, since
  *	at that time websocket protocol has not been negotiated.  Other
- *	protocols after the first one never see any HTTP callack activity.
+ *	protocols after the first one never see any HTTP callback activity.
  *
  *	The server created is a simple http server by default; part of the
  *	websocket standard is upgrading this http connection to a websocket one.
@@ -1763,6 +1823,41 @@ lws_create_context(struct lws_context_creation_info *info);
  */
 LWS_VISIBLE LWS_EXTERN void
 lws_context_destroy(struct lws_context *context);
+
+LWS_VISIBLE LWS_EXTERN void
+lws_context_destroy2(struct lws_context *context);
+
+typedef int (*lws_reload_func)(void);
+
+/**
+ * lws_context_deprecate() - Deprecate the websocket context
+ * \param context:	Websocket context
+ *
+ *	This function is used on an existing context before superceding it
+ *	with a new context.
+ *
+ *	It closes any listen sockets in the context, so new connections are
+ *	not possible.
+ *
+ *	And it marks the context to be deleted when the number of active
+ *	connections into it falls to zero.
+ *
+ *	Otherwise if you attach the deprecated context to the replacement
+ *	context when it has been created using lws_context_attach_deprecated()
+ *	both any deprecated and the new context will service their connections.
+ *
+ *	This is aimed at allowing seamless configuration reloads.
+ *
+ *	The callback cb will be called after the listen sockets are actually
+ *	closed and may be reopened.  In the callback the new context should be
+ *	configured and created.  (With libuv, socket close happens async after
+ *	more loop events).
+ */
+LWS_VISIBLE LWS_EXTERN void
+lws_context_deprecate(struct lws_context *context, lws_reload_func cb);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_context_is_deprecated(struct lws_context *context);
 
 /**
  * lws_set_proxy() - Setups proxy to lws_context.
@@ -1868,7 +1963,8 @@ lws_json_dump_vhost(const struct lws_vhost *vh, char *buf, int len);
  * \param len: max length of buf
  */
 LWS_VISIBLE LWS_EXTERN int
-lws_json_dump_context(const struct lws_context *context, char *buf, int len);
+lws_json_dump_context(const struct lws_context *context, char *buf, int len,
+		      int hide_vhosts);
 
 /**
  * lws_context_user() - get the user data associated with the context
@@ -1953,6 +2049,19 @@ struct lws_http_mount {
 
 	unsigned char origin_protocol; /**< one of enum lws_mount_protocols */
 	unsigned char mountpoint_len; /**< length of mountpoint string */
+
+	const char *basic_auth_login_file;
+	/**<NULL, or filepath to use to check basic auth logins against */
+
+	/* Add new things just above here ---^
+	 * This is part of the ABI, don't needlessly break compatibility
+	 *
+	 * The below is to ensure later library versions with new
+	 * members added above will see 0 (default) even if the app
+	 * was not built against the newer headers.
+	 */
+
+	void *_unused[2]; /**< dummy */
 };
 ///@}
 ///@}
@@ -1972,7 +2081,8 @@ struct lws_http_mount {
 enum lws_client_connect_ssl_connection_flags {
 	LCCSCF_USE_SSL 				= (1 << 0),
 	LCCSCF_ALLOW_SELFSIGNED			= (1 << 1),
-	LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK	= (1 << 2)
+	LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK	= (1 << 2),
+	LCCSCF_ALLOW_EXPIRED			= (1 << 3)
 };
 
 /** struct lws_client_connect_info - parameters to connect with when using
@@ -1999,8 +2109,8 @@ struct lws_client_connect_info {
 	/**< deprecated: currently leave at 0 or -1 */
 	void *userdata;
 	/**< if non-NULL, use this as wsi user_data instead of malloc it */
-	const struct lws_extension *client_exts;
-	/**< array of extensions that may be used on connection */
+	const void *client_exts;
+	/**< UNUSED... provide in info.extensions at context creation time */
 	const char *method;
 	/**< if non-NULL, do this http method instead of ws[s] upgrade.
 	 * use "GET" to be a simple http client connection */
@@ -2134,6 +2244,16 @@ lws_init_vhost_client_ssl(const struct lws_context_creation_info *info,
 LWS_VISIBLE LWS_EXTERN int
 lws_http_client_read(struct lws *wsi, char **buf, int *len);
 
+/**
+ * lws_http_client_http_response() - get last HTTP response code
+ *
+ * \param wsi: client connection
+ *
+ * Returns the last server response code, eg, 200 for client http connections.
+ */
+LWS_VISIBLE LWS_EXTERN unsigned int
+lws_http_client_http_response(struct lws *wsi);
+
 LWS_VISIBLE LWS_EXTERN void
 lws_client_http_body_pending(struct lws *wsi, int something_left_to_send);
 
@@ -2252,7 +2372,7 @@ lws_cancel_service(struct lws_context *context);
  * lws_service_fd() - Service polled socket with something waiting
  * \param context:	Websocket context
  * \param pollfd:	The pollfd entry describing the socket fd and which events
- *		happened.
+ *		happened, or NULL to tell lws to do only timeout servicing.
  *
  * This function takes a pollfd that has POLLIN or POLLOUT activity and
  * services it according to the state of the associated
@@ -2269,6 +2389,10 @@ lws_cancel_service(struct lws_context *context);
  * If the socket is foreign to lws, it leaves revents alone.  So you can
  * see if you should service yourself by checking the pollfd revents
  * after letting lws try to service it.
+ *
+ * You should also call this with pollfd = NULL to just allow the
+ * once-per-second global timeout checks; if less than a second since the last
+ * check it returns immediately then.
  */
 LWS_VISIBLE LWS_EXTERN int
 lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd);
@@ -2285,6 +2409,29 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd);
 LWS_VISIBLE LWS_EXTERN int
 lws_service_fd_tsi(struct lws_context *context, struct lws_pollfd *pollfd,
 		   int tsi);
+
+/**
+ * lws_service_adjust_timeout() - Check for any connection needing forced service
+ * \param context:	Websocket context
+ * \param timeout_ms:	The original poll timeout value.  You can just set this
+ *			to 1 if you don't really have a poll timeout.
+ * \param tsi: thread service index
+ *
+ * Under some conditions connections may need service even though there is no
+ * pending network action on them, this is "forced service".  For default
+ * poll() and libuv / libev, the library takes care of calling this and
+ * dealing with it for you.  But for external poll() integration, you need
+ * access to the apis.
+ *
+ * If anybody needs "forced service", returned timeout is zero.  In that case,
+ * you can call lws_service_tsi() with a timeout of -1 to only service
+ * guys who need forced service.
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_service_adjust_timeout(struct lws_context *context, int timeout_ms, int tsi);
+
+/* Backwards compatibility */
+#define lws_plat_service_tsi lws_service_tsi
 
 ///@}
 
@@ -2354,6 +2501,7 @@ lws_serve_http_file_fragment(struct lws *wsi);
 enum http_status {
 	HTTP_STATUS_OK						= 200,
 	HTTP_STATUS_NO_CONTENT					= 204,
+	HTTP_STATUS_PARTIAL_CONTENT				= 206,
 
 	HTTP_STATUS_MOVED_PERMANENTLY				= 301,
 	HTTP_STATUS_FOUND					= 302,
@@ -2551,6 +2699,7 @@ enum lws_token_indexes {
 	WSI_TOKEN_PROXY						= 77,
 	WSI_TOKEN_HTTP_X_REAL_IP				= 78,
 	WSI_TOKEN_HTTP1_0					= 79,
+	WSI_TOKEN_X_FORWARDED_FOR				= 80,
 
 	/****** add new things just above ---^ ******/
 
@@ -3031,6 +3180,9 @@ lws_libuv_run(const struct lws_context *context, int tsi);
 LWS_VISIBLE LWS_EXTERN void
 lws_libuv_stop(struct lws_context *context);
 
+LWS_VISIBLE LWS_EXTERN void
+lws_libuv_stop_without_kill(const struct lws_context *context, int tsi);
+
 LWS_VISIBLE LWS_EXTERN int
 lws_uv_initloop(struct lws_context *context, uv_loop_t *loop, int tsi);
 
@@ -3227,10 +3379,25 @@ enum lws_write_protocol {
  *	allows maximum efficiency of sending data and protocol in a single
  *	packet while not burdening the user code with any protocol knowledge.
  *
- *	Return may be -1 for a fatal error needing connection close, or a
- *	positive number reflecting the amount of bytes actually sent.  This
- *	can be less than the requested number of bytes due to OS memory
- *	pressure at any given time.
+ *	Return may be -1 for a fatal error needing connection close, or the
+ *	number of bytes sent.
+ *
+ * Truncated Writes
+ * ================
+ *
+ * The OS may not accept everything you asked to write on the connection.
+ *
+ * Posix defines POLLOUT indication from poll() to show that the connection
+ * will accept more write data, but it doesn't specifiy how much.  It may just
+ * accept one byte of whatever you wanted to send.
+ *
+ * LWS will buffer the remainder automatically, and send it out autonomously.
+ *
+ * During that time, WRITABLE callbacks will be suppressed.
+ *
+ * This is to handle corner cases where unexpectedly the OS refuses what we
+ * usually expect it to accept.  You should try to send in chunks that are
+ * almost always accepted in order to avoid the inefficiency of the buffering.
  */
 LWS_VISIBLE LWS_EXTERN int
 lws_write(struct lws *wsi, unsigned char *buf, size_t len,
@@ -3239,7 +3406,6 @@ lws_write(struct lws *wsi, unsigned char *buf, size_t len,
 /* helper for case where buffer may be const */
 #define lws_write_http(wsi, buf, len) \
 	lws_write(wsi, (unsigned char *)(buf), len, LWS_WRITE_HTTP)
-
 ///@}
 
 /** \defgroup callback-when-writeable Callback when writeable
@@ -3455,6 +3621,7 @@ lws_remaining_packet_payload(struct lws *wsi);
 
 /**
  * lws_adopt_socket() - adopt foreign socket as if listen socket accepted it
+ * for the default vhost of context.
  * \param context: lws context
  * \param accept_fd: fd of already-accepted socket to adopt
  *
@@ -3467,7 +3634,22 @@ lws_remaining_packet_payload(struct lws *wsi);
 LWS_VISIBLE LWS_EXTERN struct lws *
 lws_adopt_socket(struct lws_context *context, lws_sockfd_type accept_fd);
 /**
+ * lws_adopt_socket_vhost() - adopt foreign socket as if listen socket accepted it
+ * for vhost
+ * \param vhost: lws vhost
+ * \param accept_fd: fd of already-accepted socket to adopt
+ *
+ * Either returns new wsi bound to accept_fd, or closes accept_fd and
+ * returns NULL, having cleaned up any new wsi pieces.
+ *
+ * LWS adopts the socket in http serving mode, it's ready to accept an upgrade
+ * to ws or just serve http.
+ */
+LWS_VISIBLE LWS_EXTERN struct lws *
+lws_adopt_socket_vhost(struct lws_vhost *vh, lws_sockfd_type accept_fd);
+/**
  * lws_adopt_socket_readbuf() - adopt foreign socket and first rx as if listen socket accepted it
+ * for the default vhost of context.
  * \param context:	lws context
  * \param accept_fd:	fd of already-accepted socket to adopt
  * \param readbuf:	NULL or pointer to data that must be drained before reading from
@@ -3490,7 +3672,33 @@ lws_adopt_socket(struct lws_context *context, lws_sockfd_type accept_fd);
  */
 LWS_VISIBLE LWS_EXTERN struct lws *
 lws_adopt_socket_readbuf(struct lws_context *context, lws_sockfd_type accept_fd,
-		const char *readbuf, size_t len);
+                         const char *readbuf, size_t len);
+/**
+ * lws_adopt_socket_vhost_readbuf() - adopt foreign socket and first rx as if listen socket
+ * accepted it for vhost.
+ * \param vhost:	lws vhost
+ * \param accept_fd:	fd of already-accepted socket to adopt
+ * \param readbuf:	NULL or pointer to data that must be drained before reading from
+ *			accept_fd
+ * \param len:		The length of the data held at \param readbuf
+ *
+ * Either returns new wsi bound to accept_fd, or closes accept_fd and
+ * returns NULL, having cleaned up any new wsi pieces.
+ *
+ * LWS adopts the socket in http serving mode, it's ready to accept an upgrade
+ * to ws or just serve http.
+ *
+ * If your external code did not already read from the socket, you can use
+ * lws_adopt_socket() instead.
+ *
+ * This api is guaranteed to use the data at \param readbuf first, before reading from
+ * the socket.
+ *
+ * readbuf is limited to the size of the ah rx buf, currently 2048 bytes.
+ */
+LWS_VISIBLE LWS_EXTERN struct lws *
+lws_adopt_socket_vhost_readbuf(struct lws_vhost *vhost, lws_sockfd_type accept_fd,
+                               const char *readbuf, size_t len);
 ///@}
 
 /** \defgroup net Network related helper APIs
@@ -3566,6 +3774,20 @@ lws_interface_to_sa(int ipv6, const char *ifname, struct sockaddr_in *addr,
 * Various APIs outside of other categories
 */
 ///@{
+
+/**
+ * lws_snprintf(): snprintf that truncates the returned length too
+ *
+ * \param str: destination buffer
+ * \param size: bytes left in destination buffer
+ * \param format: format string
+ * \param ...: args for format
+ *
+ * This lets you correctly truncate buffers by concatenating lengths, if you
+ * reach the limit the reported length doesn't exceed the limit.
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_snprintf(char *str, size_t size, const char *format, ...);
 
 /**
  * lws_get_random(): fill a buffer with platform random data
@@ -3766,6 +3988,17 @@ lws_is_ssl(struct lws *wsi);
  */
 LWS_VISIBLE LWS_EXTERN int
 lws_is_cgi(struct lws *wsi);
+
+#ifdef LWS_OPENSSL_SUPPORT
+/**
+ * lws_get_ssl() - Return wsi's SSL context structure
+ * \param wsi:	websocket connection
+ *
+ * Returns pointer to the SSL library's context structure
+ */
+LWS_VISIBLE LWS_EXTERN SSL*
+lws_get_ssl(struct lws *wsi);
+#endif
 ///@}
 
 

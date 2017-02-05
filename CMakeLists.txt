@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 2.8.9)
 
 if(NOT DEFINED CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
@@ -9,12 +9,19 @@ project(libwebsockets C)
 set(PACKAGE "libwebsockets")
 set(CPACK_PACKAGE_NAME "${PACKAGE}")
 set(CPACK_PACKAGE_VERSION_MAJOR "2")
-set(CPACK_PACKAGE_VERSION_MINOR "0")
+set(CPACK_PACKAGE_VERSION_MINOR "1")
 set(CPACK_PACKAGE_VERSION_PATCH "0")
 set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
 set(CPACK_PACKAGE_VENDOR "andy@warmcat.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PACKAGE} ${PACKAGE_VERSION}")
-set(SOVERSION "8")
+set(SOVERSION "9")
+if(NOT CPACK_GENERATOR)
+    if(UNIX)
+        set(CPACK_GENERATOR "TGZ")
+    else()
+        set(CPACK_GENERATOR "ZIP")
+    endif()
+endif()
 set(CPACK_SOURCE_GENERATOR "TGZ")
 set(CPACK_SOURCE_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
 set(VERSION "${CPACK_PACKAGE_VERSION}")
@@ -62,6 +69,7 @@ endif()
 option(LWS_WITH_STATIC "Build the static version of the library" ON)
 option(LWS_WITH_SHARED "Build the shared version of the library" ON)
 option(LWS_WITH_SSL "Include SSL support (default OpenSSL, wolfSSL if LWS_USE_WOLFSSL is set)" ON)
+option(LWS_USE_BORINGSSL "Use BoringSSL replacement for OpenSSL" OFF)
 option(LWS_USE_CYASSL "Use CyaSSL replacement for OpenSSL. When setting this, you also need to specify LWS_CYASSL_LIBRARIES and LWS_CYASSL_INCLUDE_DIRS" OFF)
 option(LWS_USE_WOLFSSL "Use wolfSSL replacement for OpenSSL. When setting this, you also need to specify LWS_WOLFSSL_LIBRARIES and LWS_WOLFSSL_INCLUDE_DIRS" OFF)
 option(LWS_WITH_ZLIB "Include zlib support (required for extensions)" ON)
@@ -101,7 +109,10 @@ option(LWS_WITH_GENERIC_SESSIONS "With the Generic Sessions plugin" OFF)
 option(LWS_WITH_SQLITE3 "Require SQLITE3 support" OFF)
 option(LWS_WITH_SMTP "Provide SMTP support" OFF)
 option(LWS_WITH_ESP8266 "Build for ESP8266" OFF)
+option(LWS_PLAT_OPTEE "Build for OPTEE" OFF)
 option(LWS_WITH_NO_LOGS "Disable all logging from being compiled in" OFF)
+option(LWS_STATIC_PIC "Build the static version of the library with position-independent code" OFF)
+option(LWS_WITH_RANGES "Support http ranges (RFC7233)" ON)
 
 if (LWS_WITH_LWSWS)
  message(STATUS "LWS_WITH_LWSWS --> Enabling LWS_WITH_PLUGINS and LWS_WITH_LIBUV")
@@ -156,6 +167,7 @@ if (LWS_WITH_ESP8266)
  set(LWS_WITHOUT_TESTAPPS ON)
  set(LWS_WITHOUT_EXTENSIONS ON)
  set(LWS_WITH_PLUGINS OFF)
+ set(LWS_WITH_RANGES OFF)
  # this implies no pthreads in the lib
  set(LWS_MAX_SMP 1)
  set(LWS_HAVE_MALLOC 1)
@@ -416,7 +428,7 @@ if (NOT LWS_HAVE_inline)
 	endif()
 endif()
 
-# Put the libaries and binaries that get built into directories at the
+# Put the libraries and binaries that get built into directories at the
 # top of the build tree rather than in hard-to-find leaf directories. 
 SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib")
@@ -474,10 +486,16 @@ CHECK_INCLUDE_FILE(strings.h LWS_HAVE_STRINGS_H)
 CHECK_INCLUDE_FILE(string.h LWS_HAVE_STRING_H)
 CHECK_INCLUDE_FILE(sys/prctl.h LWS_HAVE_SYS_PRCTL_H)
 CHECK_INCLUDE_FILE(sys/socket.h LWS_HAVE_SYS_SOCKET_H)
+CHECK_INCLUDE_FILE(sys/sockio.h LWS_HAVE_SYS_SOCKIO_H)
 CHECK_INCLUDE_FILE(sys/stat.h LWS_HAVE_SYS_STAT_H)
 CHECK_INCLUDE_FILE(sys/types.h LWS_HAVE_SYS_TYPES_H)
 CHECK_INCLUDE_FILE(unistd.h LWS_HAVE_UNISTD_H)
 CHECK_INCLUDE_FILE(vfork.h LWS_HAVE_VFORK_H)
+
+if (LWS_WITH_LIBUV)
+CHECK_INCLUDE_FILE(uv-version.h LWS_HAVE_UV_VERSION_H)
+endif()
+
 
 if (LWS_WITH_ZLIB AND NOT LWS_USE_BUNDLED_ZLIB)
 	CHECK_INCLUDE_FILE(zlib.h LWS_HAVE_ZLIB_H)
@@ -586,8 +604,13 @@ else()
 			list(APPEND SOURCES
 				lib/lws-plat-esp8266.c)
 		else()
-			list(APPEND SOURCES
-				lib/lws-plat-unix.c)
+			if (LWS_PLAT_OPTEE)
+				list(APPEND SOURCES
+					lib/lws-plat-optee.c)
+			else()
+				list(APPEND SOURCES
+					lib/lws-plat-unix.c)
+			endif()
 		endif()
 	endif()
 endif()
@@ -638,6 +661,11 @@ if (LWS_WITH_SMTP)
 		lib/smtp.c)
 endif()
 
+if (LWS_WITH_RANGES)
+	list(APPEND SOURCES
+		lib/ranges.c)
+endif()
+
 # Add helper files for Windows.
 if (WIN32)
 	set(WIN32_HELPERS_PATH win32port/win32helpers)
@@ -676,9 +704,9 @@ if (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX OR (CMAKE_C_COMPILER_ID 
     endif()
     if (UNIX OR LWS_WITH_ESP8266)
                set(CMAKE_C_FLAGS "-Wall -Werror ${VISIBILITY_FLAG} ${CMAKE_C_FLAGS}" )
-    else(UNIX)
+    else()
                set(CMAKE_C_FLAGS "-Wall ${VISIBILITY_FLAG} ${CMAKE_C_FLAGS}" )
-    endif(UNIX)
+    endif()
 endif ()
 
 if ((CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX) AND NOT LWS_WITHOUT_TESTAPPS)
@@ -704,6 +732,9 @@ source_group("Sources"          FILES ${SOURCES})
 set(LWS_LIBRARIES)
 
 if (LWS_WITH_STATIC)
+    if (LWS_STATIC_PIC)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    endif()
 	add_library(websockets STATIC
 				${HDR_PRIVATE}
 				${HDR_PUBLIC}
@@ -837,7 +868,7 @@ if (LWS_WITH_SSL)
 	endif()
 
 	if (NOT chose_ssl)
-		if (NOT OPENSSL_FOUND)
+		if (NOT OPENSSL_FOUND AND NOT LWS_USE_BORINGSSL)
 			# TODO: Add support for STATIC also.
 			find_package(OpenSSL REQUIRED)
 			set(OPENSSL_INCLUDE_DIRS "${OPENSSL_INCLUDE_DIR}")
@@ -904,7 +935,7 @@ endif()
 
 
 if (LWS_WITH_HTTP_PROXY)
-	find_library(LIBHUBBUB_LIBRARIES NAMES libhubbub)
+	find_library(LIBHUBBUB_LIBRARIES NAMES hubbub)
 	list(APPEND LIB_LIST ${LIBHUBBUB_LIBRARIES} )
 endif()
 
@@ -1030,7 +1061,9 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 
 	if (UNIX AND LWS_WITH_PLUGINS)
 		set(CMAKE_C_FLAGS "-fPIC ${CMAKE_C_FLAGS}")
-		target_link_libraries(websockets dl)
+		if(NOT(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD"))
+			target_link_libraries(websockets dl)
+		endif()
 	endif()
 
 	if (NOT LWS_WITHOUT_SERVER)
@@ -1493,6 +1526,10 @@ endif()
 if (NOT LWS_WITHOUT_TESTAPPS AND NOT LWS_WITHOUT_SERVER)
 	install(FILES ${TEST_SERVER_DATA}
 			DESTINATION share/libwebsockets-test-server
+		COMPONENT examples)
+
+		install(FILES "${PROJECT_SOURCE_DIR}/test-server/private/index.html"
+			DESTINATION share/libwebsockets-test-server/private
 			COMPONENT examples)
 if (LWS_WITH_CGI)
 	set(CGI_TEST_SCRIPT "${PROJECT_SOURCE_DIR}/test-server/lws-cgi-test.sh")
@@ -1616,7 +1653,9 @@ message(" LWS_WITH_LEJP = ${LWS_WITH_LEJP}")
 message(" LWS_WITH_LEJP_CONF = ${LWS_WITH_LEJP_CONF}")
 message(" LWS_WITH_SMTP = ${LWS_WITH_SMTP}")
 message(" LWS_WITH_GENERIC_SESSIONS = ${LWS_WITH_GENERIC_SESSIONS}")
-
+message(" LWS_STATIC_PIC = ${LWS_STATIC_PIC}")
+message(" LWS_WITH_RANGES = ${LWS_WITH_RANGES}")
+message(" LWS_PLAT_OPTEE = ${LWS_PLAT_OPTEE}")
 
 message("---------------------------------------------------------------------")
 

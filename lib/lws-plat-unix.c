@@ -100,10 +100,10 @@ LWS_VISIBLE void lwsl_emit_syslog(int level, const char *line)
 	syslog(syslog_level, "%s", line);
 }
 
-LWS_VISIBLE int
-lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
+LWS_VISIBLE LWS_EXTERN int
+_lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 {
-	struct lws_context_per_thread *pt = &context->pt[tsi];
+	struct lws_context_per_thread *pt;
 	int n = -1, m, c;
 	char buf;
 
@@ -111,6 +111,8 @@ lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 
 	if (!context || !context->vhost_list)
 		return 1;
+
+	pt = &context->pt[tsi];
 
 	if (timeout_ms < 0)
 		goto faked_service;
@@ -130,7 +132,17 @@ lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 	}
 	context->service_tid = context->service_tid_detected;
 
-	timeout_ms = lws_service_adjust_timeout(context, timeout_ms, tsi);
+	/*
+	 * is there anybody with pending stuff that needs service forcing?
+	 */
+	if (!lws_service_adjust_timeout(context, 1, tsi)) {
+		/* -1 timeout means just do forced service */
+		_lws_plat_service_tsi(context, -1, pt->tid);
+		/* still somebody left who wants forced service? */
+		if (!lws_service_adjust_timeout(context, 1, pt->tid))
+			/* yes... come back again quickly */
+			timeout_ms = 0;
+	}
 
 	n = poll(pt->fds, pt->fds_count, timeout_ms);
 
@@ -189,7 +201,7 @@ lws_plat_check_connection_error(struct lws *wsi)
 LWS_VISIBLE int
 lws_plat_service(struct lws_context *context, int timeout_ms)
 {
-	return lws_plat_service_tsi(context, timeout_ms, 0);
+	return _lws_plat_service_tsi(context, timeout_ms, 0);
 }
 
 LWS_VISIBLE int
@@ -215,7 +227,7 @@ lws_plat_set_socket_options(struct lws_vhost *vhost, int fd)
 #if defined(__APPLE__) || \
     defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || \
     defined(__NetBSD__) || \
-        defined(__CYGWIN__) || defined(__OpenBSD__)
+        defined(__CYGWIN__) || defined(__OpenBSD__) || defined (__sun)
 
 		/*
 		 * didn't find a way to set these per-socket, need to
@@ -242,10 +254,13 @@ lws_plat_set_socket_options(struct lws_vhost *vhost, int fd)
 
 	/* Disable Nagle */
 	optval = 1;
-#if !defined(__APPLE__) && \
-    !defined(__FreeBSD__) && !defined(__FreeBSD_kernel__) && \
-    !defined(__NetBSD__) && \
-    !defined(__OpenBSD__)
+#if defined (__sun)
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void *)&optval, optlen) < 0)
+		return 1;
+#elif !defined(__APPLE__) && \
+      !defined(__FreeBSD__) && !defined(__FreeBSD_kernel__) &&        \
+      !defined(__NetBSD__) && \
+      !defined(__OpenBSD__)
 	if (setsockopt(fd, SOL_TCP, TCP_NODELAY, (const void *)&optval, optlen) < 0)
 		return 1;
 #else
@@ -324,7 +339,7 @@ lws_plat_plugins_init(struct lws_context * context, const char * const *d)
 
 			lwsl_notice("   %s\n", namelist[i]->d_name);
 
-			snprintf(path, sizeof(path) - 1, "%s/%s", *d,
+			lws_snprintf(path, sizeof(path) - 1, "%s/%s", *d,
 				 namelist[i]->d_name);
 			l = dlopen(path, RTLD_NOW);
 			if (!l) {
@@ -334,7 +349,7 @@ lws_plat_plugins_init(struct lws_context * context, const char * const *d)
 				goto bail;
 			}
 			/* we could open it, can we get his init function? */
-			m = snprintf(path, sizeof(path) - 1, "init_%s",
+			m = lws_snprintf(path, sizeof(path) - 1, "init_%s",
 				     namelist[i]->d_name + 3 /* snip lib... */);
 			path[m - 3] = '\0'; /* snip the .so */
 			initfunc = dlsym(l, path);
@@ -399,7 +414,7 @@ lws_plat_plugins_destroy(struct lws_context * context)
 
 	while (plugin) {
 		p = plugin;
-		m = snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name + 3);
+		m = lws_snprintf(path, sizeof(path) - 1, "destroy_%s", plugin->name + 3);
 		path[m - 3] = '\0';
 		func = dlsym(plugin->l, path);
 		if (!func) {
@@ -466,11 +481,16 @@ lws_plat_context_late_destroy(struct lws_context *context)
 		lws_free(context->lws_lookup);
 
 	while (m--) {
-		close(pt->dummy_pipe_fds[0]);
-		close(pt->dummy_pipe_fds[1]);
+		if (pt->dummy_pipe_fds[0])
+			close(pt->dummy_pipe_fds[0]);
+		if (pt->dummy_pipe_fds[1])
+			close(pt->dummy_pipe_fds[1]);
 		pt++;
 	}
-	close(context->fd_random);
+	if (!context->fd_random)
+		lwsl_err("ZERO RANDOM FD\n");
+	if (context->fd_random != LWS_INVALID_FILE)
+		close(context->fd_random);
 }
 
 /* cast a struct sockaddr_in6 * into addr for ipv6 */
@@ -531,7 +551,7 @@ lws_interface_to_sa(int ipv6, const char *ifname, struct sockaddr_in *addr,
 	freeifaddrs(ifr);
 
 	if (rc == -1) {
-		/* check if bind to IP adddress */
+		/* check if bind to IP address */
 #ifdef LWS_USE_IPV6
 		if (inet_pton(AF_INET6, ifname, &addr6->sin6_addr) == 1)
 			rc = 0;

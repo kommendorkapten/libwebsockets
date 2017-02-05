@@ -187,8 +187,8 @@ LWS_VISIBLE void lwsl_emit_syslog(int level, const char *line)
 	output_redirect(line);
 }
 
-LWS_VISIBLE int
-lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
+LWS_VISIBLE LWS_EXTERN int
+_lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 {
 	return 0;
 }
@@ -202,7 +202,7 @@ lws_plat_check_connection_error(struct lws *wsi)
 LWS_VISIBLE int
 lws_plat_service(struct lws_context *context, int timeout_ms)
 {
-//	return lws_plat_service_tsi(context, timeout_ms, 0);
+//	return _lws_plat_service_tsi(context, timeout_ms, 0);
 	return 0;
 }
 
@@ -249,7 +249,7 @@ lws_plat_get_peer_simple(struct lws *wsi, char *name, int namelen)
 {
 	unsigned char *p = wsi->sock->proto.tcp->remote_ip;
 
-	snprintf(name, namelen, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+	lws_snprintf(name, namelen, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
 
 	return name;
 }

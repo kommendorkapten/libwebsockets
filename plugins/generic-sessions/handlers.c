@@ -39,7 +39,7 @@ lwsgs_handler_confirm(struct per_vhost_data__gs *vhd, struct lws *wsi,
 		goto verf_fail;
 
 	u.username[0] = '\0';
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "select username,email,verified from users where token = '%s';",
 		 lws_sql_purify(esc, &cookie[6], sizeof(esc) - 1));
 	if (sqlite3_exec(vhd->pdb, s, lwsgs_lookup_callback_user, &u, NULL) !=
@@ -55,7 +55,7 @@ lwsgs_handler_confirm(struct per_vhost_data__gs *vhd, struct lws *wsi,
 	}
 
 	lwsl_notice("Verifying %s\n", u.username);
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "update users set verified=%d where username='%s';",
 		 LWSGS_VERIFIED_ACCEPTED,
 		 lws_sql_purify(esc, u.username, sizeof(esc) - 1));
@@ -74,7 +74,7 @@ lwsgs_handler_confirm(struct per_vhost_data__gs *vhd, struct lws *wsi,
 	a.email = u.email;
 	lws_callback_vhost_protocols(wsi, LWS_CALLBACK_GS_EVENT, &a, 0);
 
-	snprintf(pss->onward, sizeof(pss->onward),
+	lws_snprintf(pss->onward, sizeof(pss->onward),
 		 "%s/post-verify-ok.html", vhd->email_confirm_url);
 
 	pss->login_expires = lws_now_secs() + vhd->timeout_absolute_secs;
@@ -98,7 +98,7 @@ verf_fail:
 	lwsgs_get_sid_from_wsi(wsi, &pss->delete_session);
 	pss->login_expires = 0;
 
-	snprintf(pss->onward, sizeof(pss->onward), "%s/post-verify-fail.html",
+	lws_snprintf(pss->onward, sizeof(pss->onward), "%s/post-verify-fail.html",
 		 vhd->email_confirm_url);
 
 	return 1;
@@ -119,7 +119,7 @@ lwsgs_handler_forgot(struct per_vhost_data__gs *vhd, struct lws *wsi,
 		goto forgot_fail;
 
 	u.username[0] = '\0';
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "select username,verified from users where verified=%d and "
 		 "token = '%s' and token_time != 0;",
 		 LWSGS_VERIFIED_ACCEPTED,
@@ -140,7 +140,7 @@ lwsgs_handler_forgot(struct per_vhost_data__gs *vhd, struct lws *wsi,
 
 	/* mark user as having validated forgot flow just now */
 
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "update users set token_time=0,last_forgot_validated=%lu "
 		 "where username='%s';",
 		 (unsigned long)lws_now_secs(),
@@ -157,7 +157,7 @@ lwsgs_handler_forgot(struct per_vhost_data__gs *vhd, struct lws *wsi,
 	if (!a)
 		a = "broken-forget-post-good-url";
 
-	snprintf(pss->onward, sizeof(pss->onward),
+	lws_snprintf(pss->onward, sizeof(pss->onward),
 		 "%s/%s", vhd->email_confirm_url, a);
 
 	pss->login_expires = lws_now_secs() + vhd->timeout_absolute_secs;
@@ -185,7 +185,7 @@ forgot_fail:
 	if (!a)
 		a = "broken-forget-post-bad-url";
 
-	snprintf(pss->onward, sizeof(pss->onward), "%s/%s",
+	lws_snprintf(pss->onward, sizeof(pss->onward), "%s/%s",
 		 vhd->email_confirm_url, a);
 
 	return 1;
@@ -227,7 +227,7 @@ lwsgs_handler_check(struct per_vhost_data__gs *vhd,
 		goto reply;
 	}
 
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "select username, email from users where %s = '%s';",
 		 colname[n], lws_sql_purify(esc, pc, sizeof(esc) - 1));
 	if (sqlite3_exec(vhd->pdb, s, lwsgs_lookup_callback_user, &u, NULL) !=
@@ -289,20 +289,27 @@ lwsgs_handler_change_password(struct per_vhost_data__gs *vhd, struct lws *wsi,
 				return 1;
 
 			/* did a forgot pw ? */
-			if (u.last_forgot_validated > lws_now_secs() - 300)
+			if (u.last_forgot_validated > lws_now_secs() - 300) {
 				n |= LWSGS_AUTH_FORGOT_FLOW;
+				lwsl_debug("within forgot password flow\n");
+			}
 		}
 	}
 
+	lwsl_debug("auth value %d\n", n);
+
 	/* if he just did forgot pw flow, don't need old pw */
-	if (!(n & (LWSGS_AUTH_FORGOT_FLOW | 1))) {
+	if ((n & (LWSGS_AUTH_FORGOT_FLOW | 1)) != (LWSGS_AUTH_FORGOT_FLOW | 1)) {
 		/* otherwise user:pass must be right */
+		lwsl_debug("checking pw\n");
 		if (lwsgs_check_credentials(vhd,
 			   lws_spa_get_string(pss->spa, FGS_USERNAME),
 			   lws_spa_get_string(pss->spa, FGS_CURPW))) {
 			lwsl_notice("credentials bad\n");
 			return 1;
 		}
+
+		lwsl_debug("current pw checks out\n");
 
 		strncpy(u.username, lws_spa_get_string(pss->spa, FGS_USERNAME), sizeof(u.username) - 1);
 		u.username[sizeof(u.username) - 1] = '\0';
@@ -320,7 +327,7 @@ lwsgs_handler_change_password(struct per_vhost_data__gs *vhd, struct lws *wsi,
 		a.email = "";
 		lws_callback_vhost_protocols(wsi, LWS_CALLBACK_GS_EVENT, &a, 0);
 
-		snprintf(s, sizeof(s) - 1,
+		lws_snprintf(s, sizeof(s) - 1,
 			 "delete from users where username='%s';"
 			 "delete from sessions where username='%s';",
 			 lws_sql_purify(esc, u.username, sizeof(esc) - 1),
@@ -333,7 +340,7 @@ lwsgs_handler_change_password(struct per_vhost_data__gs *vhd, struct lws *wsi,
 
 	lwsl_notice("updating password hash\n");
 
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "update users set pwhash='%s', pwsalt='%s', "
 		 "last_forgot_validated=0 where username='%s';",
 		 u.pwhash.id, u.pwsalt.id,
@@ -385,13 +392,13 @@ lwsgs_handler_forgot_pw_form(struct per_vhost_data__gs *vhd,
 
 	u.username[0] = '\0';
 	if (lws_spa_get_string(pss->spa, FGS_USERNAME))
-		snprintf(s, sizeof(s) - 1,
+		lws_snprintf(s, sizeof(s) - 1,
 		 "select username,email "
 		 "from users where username = '%s';",
 		 lws_sql_purify(esc, lws_spa_get_string(pss->spa, FGS_USERNAME),
 				 sizeof(esc) - 1));
 	else
-		snprintf(s, sizeof(s) - 1,
+		lws_snprintf(s, sizeof(s) - 1,
 		 "select username,email "
 		 "from users where email = '%s';",
 		 lws_sql_purify(esc, lws_spa_get_string(pss->spa, FGS_EMAIL), sizeof(esc) - 1));
@@ -414,7 +421,7 @@ lwsgs_handler_forgot_pw_form(struct per_vhost_data__gs *vhd,
 		return 1;
 	}
 	sha1_to_lwsgw_hash(sid_rand, &hash);
-	n = snprintf(s, sizeof(s),
+	n = lws_snprintf(s, sizeof(s),
 		"From: Forgot Password Assistant Noreply <%s>\n"
 		"To: %s <%s>\n"
 		  "Subject: Password reset request\n"
@@ -427,7 +434,7 @@ lwsgs_handler_forgot_pw_form(struct per_vhost_data__gs *vhd,
 		lws_sql_purify(esc2, u.email, sizeof(esc2) - 1),
 		lws_sql_purify(esc3, u.username, sizeof(esc3) - 1),
 		lws_sql_purify(esc4, pss->ip, sizeof(esc4) - 1));
-	snprintf(s + n, sizeof(s) -n,
+	lws_snprintf(s + n, sizeof(s) -n,
 		  "%s/lwsgs-forgot?token=%s"
 		   "&good=%s"
 		   "&bad=%s\n\n"
@@ -446,7 +453,7 @@ lwsgs_handler_forgot_pw_form(struct per_vhost_data__gs *vhd,
 			      sizeof(esc3) - 1),
 		vhd->email_contact_person);
 
-	snprintf((char *)buffer, sizeof(buffer) - 1,
+	lws_snprintf((char *)buffer, sizeof(buffer) - 1,
 		 "insert into email(username, content)"
 		 " values ('%s', '%s');",
 		lws_sql_purify(esc, u.username, sizeof(esc) - 1), s);
@@ -457,7 +464,7 @@ lwsgs_handler_forgot_pw_form(struct per_vhost_data__gs *vhd,
 		return 1;
 	}
 
-	snprintf(s, sizeof(s) - 1,
+	lws_snprintf(s, sizeof(s) - 1,
 		 "update users set token='%s',token_time='%ld' where username='%s';",
 		 hash.id, (long)lws_now_secs(),
 		 lws_sql_purify(esc, u.username, sizeof(esc) - 1));
@@ -513,7 +520,7 @@ lwsgs_handler_register_form(struct per_vhost_data__gs *vhd,
 	}
 
 	u.username[0] = '\0';
-	snprintf(s, sizeof(s) - 1, "select username, email from users where email = '%s';",
+	lws_snprintf(s, sizeof(s) - 1, "select username, email from users where email = '%s';",
 		 lws_sql_purify(esc, lws_spa_get_string(pss->spa, FGS_EMAIL),
 		 sizeof(esc) - 1));
 
@@ -543,7 +550,7 @@ lwsgs_handler_register_form(struct per_vhost_data__gs *vhd,
 	}
 	sha1_to_lwsgw_hash(sid_rand, &hash);
 
-	snprintf((char *)buffer, sizeof(buffer) - 1,
+	lws_snprintf((char *)buffer, sizeof(buffer) - 1,
 		 "insert into users(username,"
 		 " creation_time, ip, email, verified,"
 		 " pwhash, pwsalt, token, last_forgot_validated)"
@@ -561,7 +568,7 @@ lwsgs_handler_register_form(struct per_vhost_data__gs *vhd,
 		return 1;
 	}
 
-	snprintf(s, sizeof(s),
+	lws_snprintf(s, sizeof(s),
 		"From: Noreply <%s>\n"
 		"To: %s <%s>\n"
 		  "Subject: Registration verification\n"
@@ -584,7 +591,7 @@ lwsgs_handler_register_form(struct per_vhost_data__gs *vhd,
 		vhd->email_confirm_url, hash.id,
 		vhd->email_contact_person);
 
-	snprintf((char *)buffer, sizeof(buffer) - 1,
+	lws_snprintf((char *)buffer, sizeof(buffer) - 1,
 		 "insert into email(username, content) values ('%s', '%s');",
 		lws_sql_purify(esc, lws_spa_get_string(pss->spa, FGS_USERNAME),
 			       sizeof(esc) - 1), s);

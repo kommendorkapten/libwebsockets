@@ -140,6 +140,11 @@ callback_dumb_increment(struct lws *wsi, enum lws_callback_reasons reason,
 			return 1;
 		break;
 
+	case LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP:
+		lwsl_notice("lws_http_client_http_response %d\n",
+				lws_http_client_http_response(wsi));
+		break;
+
 	case LWS_CALLBACK_RECEIVE_CLIENT_HTTP:
 		{
 			char buffer[1024 + LWS_PRE];
@@ -324,13 +329,13 @@ callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
 
 static struct lws_protocols protocols[] = {
 	{
-		"dumb-increment-protocol,fake-nonexistant-protocol",
+		"dumb-increment-protocol",
 		callback_dumb_increment,
 		0,
 		20,
 	},
 	{
-		"fake-nonexistant-protocol,lws-mirror-protocol",
+		"lws-mirror-protocol",
 		callback_lws_mirror,
 		0,
 		128,
@@ -523,6 +528,7 @@ int main(int argc, char **argv)
 	info.gid = -1;
 	info.uid = -1;
 	info.ws_ping_pong_interval = pp_secs;
+	info.extensions = exts;
 
 	if (use_ssl) {
 		info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
@@ -578,7 +584,6 @@ int main(int argc, char **argv)
 	i.host = i.address;
 	i.origin = i.address;
 	i.ietf_version_or_minus_one = ietf_version;
-	i.client_exts = exts;
 
 	if (!strcmp(prot, "http") || !strcmp(prot, "https")) {
 		lwsl_notice("using %s mode (non-ws)\n", prot);

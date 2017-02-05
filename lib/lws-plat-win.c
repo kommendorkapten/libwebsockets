@@ -6,7 +6,9 @@
 unsigned long long
 time_in_microseconds()
 {
+#ifndef DELTA_EPOCH_IN_MICROSECS
 #define DELTA_EPOCH_IN_MICROSECS 11644473600000000ULL
+#endif
 	FILETIME filetime;
 	ULARGE_INTEGER datetime;
 
@@ -146,10 +148,10 @@ LWS_VISIBLE void lwsl_emit_syslog(int level, const char *line)
 	lwsl_emit_stderr(level, line);
 }
 
-LWS_VISIBLE int
-lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
+LWS_VISIBLE LWS_EXTERN int
+_lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 {
-	struct lws_context_per_thread *pt = &context->pt[tsi];
+	struct lws_context_per_thread *pt;
 	WSANETWORKEVENTS networkevents;
 	struct lws_pollfd *pfd;
 	struct lws *wsi;
@@ -160,6 +162,8 @@ lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 	/* stay dead once we are dead */
 	if (context == NULL)
 		return 1;
+
+	pt = &context->pt[tsi];
 
 	if (!context->service_tid_detected) {
 		struct lws _lws;
@@ -212,15 +216,25 @@ lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 			i--;
 	}
 
-	/* if we know something needs service already, don't wait in poll */
-	timeout_ms = lws_service_adjust_timeout(context, timeout_ms, tsi);
+	/*
+	 * is there anybody with pending stuff that needs service forcing?
+	 */
+	if (!lws_service_adjust_timeout(context, 1, tsi)) {
+		/* -1 timeout means just do forced service */
+		_lws_plat_service_tsi(context, -1, pt->tid);
+		/* still somebody left who wants forced service? */
+		if (!lws_service_adjust_timeout(context, 1, pt->tid))
+			/* yes... come back again quickly */
+			timeout_ms = 0;
+	}
 
 	ev = WSAWaitForMultipleEvents( 1,  pt->events , FALSE, timeout_ms, FALSE);
 	if (ev == WSA_WAIT_EVENT_0) {
+		unsigned int eIdx;
 
 		WSAResetEvent(pt->events[0]);
 
-		for(unsigned int eIdx = 0; eIdx < pt->fds_count; ++eIdx) {
+		for (eIdx = 0; eIdx < pt->fds_count; ++eIdx) {
 			if (WSAEnumNetworkEvents(pt->fds[eIdx].fd, 0, &networkevents) == SOCKET_ERROR) {
 				lwsl_err("WSAEnumNetworkEvents() failed with error %d\n", LWS_ERRNO);
 				return -1;
@@ -268,7 +282,7 @@ lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 LWS_VISIBLE int
 lws_plat_service(struct lws_context *context, int timeout_ms)
 {
-	return lws_plat_service_tsi(context, timeout_ms, 0);
+	return _lws_plat_service_tsi(context, timeout_ms, 0);
 }
 
 LWS_VISIBLE int
@@ -626,3 +640,17 @@ lws_plat_init(struct lws_context *context,
 
 	return 0;
 }
+
+
+int kill(int pid, int sig)
+{
+	lwsl_err("Sorry Windows doesn't support kill().");
+	exit(0);
+}
+
+int fork(void)
+{
+	lwsl_err("Sorry Windows doesn't support fork().");
+	exit(0);
+}
+

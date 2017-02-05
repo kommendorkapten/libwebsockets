@@ -37,8 +37,7 @@ OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 {
 	SSL *ssl;
 	int n;
-	struct lws_vhost *vh;
-	struct lws wsi;
+	struct lws *wsi;
 
 	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
 		SSL_get_ex_data_X509_STORE_CTX_idx());
@@ -47,17 +46,9 @@ OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	 * !!! nasty openssl requires the index to come as a library-scope
 	 * static
 	 */
-	vh = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+	wsi = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
 
-	/*
-	 * give him a fake wsi with context set, so he can use lws_get_context()
-	 * in the callback
-	 */
-	memset(&wsi, 0, sizeof(wsi));
-	wsi.vhost = vh;
-	wsi.context = vh->context;
-
-	n = vh->protocols[0].callback(&wsi,
+	n = wsi->vhost->protocols[0].callback(wsi,
 			LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION,
 					   x509_ctx, ssl, preverify_ok);
 
@@ -211,7 +202,6 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 		vhost->use_ssl = 0;
 		return 0;
 	}
-
 	if (info->port != CONTEXT_PORT_NO_LISTEN) {
 
 		vhost->use_ssl = info->ssl_cert_filepath != NULL;
@@ -392,8 +382,12 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 
 	if (info->ssl_options_set)
 		SSL_CTX_set_options(vhost->ssl_ctx, info->ssl_options_set);
+
+/* SSL_clear_options introduced in 0.9.8m */
+#if (OPENSSL_VERSION_NUMBER >= 0x009080df) && !defined(USE_WOLFSSL)
 	if (info->ssl_options_clear)
 		SSL_CTX_clear_options(vhost->ssl_ctx, info->ssl_options_clear);
+#endif
 
 	lwsl_info(" SSL options 0x%X\n",
 		    SSL_CTX_get_options(vhost->ssl_ctx));

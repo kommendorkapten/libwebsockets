@@ -3,7 +3,7 @@ var group__client =
     [ "lws_client_connect_info", "structlws__client__connect__info.html", [
       [ "_unused", "structlws__client__connect__info.html#ad47f50d1633dc5df74548606c9a66d73", null ],
       [ "address", "structlws__client__connect__info.html#aa364094f94ef1bcaaabbd9161971d502", null ],
-      [ "client_exts", "structlws__client__connect__info.html#a7732b996e977393c3e1076be2a8ded6c", null ],
+      [ "client_exts", "structlws__client__connect__info.html#aaf76f45db5b4354894bae03a4f8f65a5", null ],
       [ "context", "structlws__client__connect__info.html#afe999d133cc240a0bfd02aade0514cfd", null ],
       [ "host", "structlws__client__connect__info.html#a9b36d47c3422329df32c21040a35ebc7", null ],
       [ "ietf_version_or_minus_one", "structlws__client__connect__info.html#a69abb5aeed755750b9755e5c91db6895", null ],
@@ -24,5 +24,6 @@ var group__client =
     [ "lws_client_connect", "group__client.html#ga4af0a20108a95e8b6d94dd4d80055ff3", null ],
     [ "lws_client_connect_extended", "group__client.html#gac6a8558b4410961a880241c2ac1271e2", null ],
     [ "lws_client_connect_via_info", "group__client.html#ga0c966136905f467816307cfba6deb5fd", null ],
+    [ "lws_http_client_http_response", "group__client.html#ga715efffc0c4e8fbf72a4293008eb2187", null ],
     [ "lws_init_vhost_client_ssl", "group__client.html#ga4f44b8230e6732816ca5cd8d1aaaf340", null ]
 ];

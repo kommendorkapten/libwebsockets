@@ -60,6 +60,8 @@ lextable_decode(int pos, char c)
 	}
 }
 
+// doesn't scrub the ah rxbuffer by default, parent must do if needed
+
 void
 lws_header_table_reset(struct lws *wsi, int autoservice)
 {
@@ -76,10 +78,7 @@ lws_header_table_reset(struct lws *wsi, int autoservice)
 	memset(ah->frag_index, 0, sizeof(ah->frag_index));
 	ah->nfrag = 0;
 	ah->pos = 0;
-
-	/* and reset the rx state */
-	ah->rxpos = 0;
-	ah->rxlen = 0;
+	ah->http_response = 0;
 
 	/* since we will restart the ah, our new headers are not completed */
 	// wsi->hdr_parsing_completed = 0;
@@ -182,6 +181,11 @@ lws_header_table_attach(struct lws *wsi, int autoservice)
 	lws_pt_unlock(pt);
 
 reset:
+
+	/* and reset the rx state */
+	wsi->u.hdr.ah->rxpos = 0;
+	wsi->u.hdr.ah->rxlen = 0;
+
 	lws_header_table_reset(wsi, autoservice);
 	time(&wsi->u.hdr.ah->assigned);
 
@@ -288,6 +292,9 @@ int lws_header_table_detach(struct lws *wsi, int autoservice)
 
 	wsi->u.hdr.ah = ah;
 	ah->wsi = wsi; /* new owner */
+	/* and reset the rx state */
+	ah->rxpos = 0;
+	ah->rxlen = 0;
 	lws_header_table_reset(wsi, autoservice);
 	time(&wsi->u.hdr.ah->assigned);
 
@@ -1455,7 +1462,7 @@ lws_remaining_packet_payload(struct lws *wsi)
  * to expect in that state and can deal with it in bulk more efficiently.
  */
 
-void
+int
 lws_payload_until_length_exhausted(struct lws *wsi, unsigned char **buf,
 				   size_t *len)
 {
@@ -1480,7 +1487,7 @@ lws_payload_until_length_exhausted(struct lws *wsi, unsigned char **buf,
 
 	/* we want to leave 1 byte for the parser to handle properly */
 	if (avail <= 1)
-		return;
+		return 0;
 
 	avail--;
 	rx_ubuf = wsi->u.ws.rx_ubuf + LWS_PRE + wsi->u.ws.rx_ubuf_head;
@@ -1510,4 +1517,6 @@ lws_payload_until_length_exhausted(struct lws *wsi, unsigned char **buf,
 	wsi->u.ws.rx_ubuf_head += avail;
 	wsi->u.ws.rx_packet_length -= avail;
 	*len -= avail;
+
+	return avail;
 }

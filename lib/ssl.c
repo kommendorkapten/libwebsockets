@@ -35,6 +35,9 @@ static int urandom_bytes(void *ctx, unsigned char *dest, size_t len)
 	int cur;
 	int fd = open("/dev/urandom", O_RDONLY);
 
+	if (fd < 0)
+		return -1;
+
 	while (len) {
 		cur = read(fd, dest, len);
 		if (cur < 0)
@@ -68,6 +71,50 @@ int lws_ssl_get_error(struct lws *wsi, int n)
 	return SSL_get_error(wsi->ssl, n);
 #endif
 #endif
+}
+
+/* Copies a string describing the code returned by lws_ssl_get_error(),
+ * which may also contain system error information in the case of SSL_ERROR_SYSCALL,
+ * into buf up to len.
+ * Returns a pointer to buf.
+ *
+ * Note: the lws_ssl_get_error() code is *not* an error code that can be passed
+ * to ERR_error_string(),
+ *
+ * ret is the return value originally passed to lws_ssl_get_error(), needed to disambiguate
+ * SYS_ERROR_SYSCALL.
+ *
+ * See man page for SSL_get_error().
+ *
+ * Not thread safe, uses strerror()
+ */
+char* lws_ssl_get_error_string(int status, int ret, char *buf, size_t len) {
+	switch (status) {
+	case SSL_ERROR_NONE: return strncpy(buf, "SSL_ERROR_NONE", len);
+	case SSL_ERROR_ZERO_RETURN: return strncpy(buf, "SSL_ERROR_ZERO_RETURN", len);
+	case SSL_ERROR_WANT_READ: return strncpy(buf, "SSL_ERROR_WANT_READ", len);
+	case SSL_ERROR_WANT_WRITE: return strncpy(buf, "SSL_ERROR_WANT_WRITE", len);
+	case SSL_ERROR_WANT_CONNECT: return strncpy(buf, "SSL_ERROR_WANT_CONNECT", len);
+	case SSL_ERROR_WANT_ACCEPT: return strncpy(buf, "SSL_ERROR_WANT_ACCEPT", len);
+	case SSL_ERROR_WANT_X509_LOOKUP: return strncpy(buf, "SSL_ERROR_WANT_X509_LOOKUP", len);
+	case SSL_ERROR_SYSCALL:
+		switch (ret) {
+                case 0:
+                        snprintf(buf, len, "SSL_ERROR_SYSCALL: EOF");
+                        return buf;
+                case -1:
+#ifndef LWS_PLAT_OPTEE
+			snprintf(buf, len, "SSL_ERROR_SYSCALL: %s", strerror(errno));
+#else
+			snprintf(buf, len, "SSL_ERROR_SYSCALL: %d", errno);
+#endif
+			return buf;
+                default:
+                        return strncpy(buf, "SSL_ERROR_SYSCALL", len);
+	}
+	case SSL_ERROR_SSL: return "SSL_ERROR_SSL";
+	default: return "SSL_ERROR_UNKNOWN";
+	}
 }
 
 void
@@ -144,7 +191,11 @@ lws_context_init_ssl_library(struct lws_context_creation_info *info)
 #if defined(LWS_USE_MBEDTLS)
 	lwsl_notice(" Compiled with mbedTLS support\n");
 #else
+#if defined(LWS_USE_BORINGSSL)
+	lwsl_notice(" Compiled with BoringSSL support\n");
+#else
 	lwsl_notice(" Compiled with OpenSSL support\n");
+#endif
 #endif
 #endif
 #endif
@@ -160,6 +211,9 @@ lws_context_init_ssl_library(struct lws_context_creation_info *info)
 #else
 #if defined(LWS_USE_MBEDTLS)
 #else
+
+	lwsl_notice("Doing SSL library init\n");
+
 	SSL_library_init();
 
 	OpenSSL_add_all_algorithms();
@@ -194,12 +248,15 @@ lws_ssl_destroy(struct lws_vhost *vhost)
 	if (!vhost->user_supplied_ssl_ctx && vhost->ssl_client_ctx)
 		SSL_CTX_free(vhost->ssl_client_ctx);
 
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_WOLFSSL)
+// after 1.1.0 no need
+#if (OPENSSL_VERSION_NUMBER <  0x10100000)
+// <= 1.0.1f = old api, 1.0.1g+ = new api
+#if (OPENSSL_VERSION_NUMBER <= 0x1000106f) || defined(USE_WOLFSSL)
 	ERR_remove_state(0);
 #else
-#if (OPENSSL_VERSION_NUMBER >= 0x10100005L) && \
-	!defined(LIBRESSL_VERSION_NUMBER) && \
-	!defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER >= 0x1010005f && \
+    !defined(LIBRESSL_VERSION_NUMBER) && \
+    !defined(OPENSSL_IS_BORINGSSL)
 	ERR_remove_thread_state();
 #else
 	ERR_remove_thread_state(NULL);
@@ -208,6 +265,8 @@ lws_ssl_destroy(struct lws_vhost *vhost)
 	ERR_free_strings();
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
+#endif
+
 #endif
 #endif
 }
@@ -276,19 +335,28 @@ lws_ssl_capable_read(struct lws *wsi, unsigned char *buf, int len)
 #endif
 
 	/* manpage: returning 0 means connection shut down */
-	if (!n)
+	if (!n) {
+			lwsl_err("%s failed: %s\n",__func__,
+				 ERR_error_string(lws_ssl_get_error(wsi, 0), NULL));
+			lws_decode_ssl_error();
+
 		return LWS_SSL_CAPABLE_ERROR;
+	}
 
 	if (n < 0) {
 		n = lws_ssl_get_error(wsi, n);
 		if (n ==  SSL_ERROR_WANT_READ || n ==  SSL_ERROR_WANT_WRITE)
 			return LWS_SSL_CAPABLE_MORE_SERVICE;
 
+		lwsl_err("%s failed2: %s\n",__func__,
+				 ERR_error_string(lws_ssl_get_error(wsi, 0), NULL));
+			lws_decode_ssl_error();
+
 		return LWS_SSL_CAPABLE_ERROR;
 	}
 
 	if (wsi->vhost)
-		wsi->vhost->rx += n;
+		wsi->vhost->conn_stats.rx += n;
 
 	lws_restart_ws_ping_pong_timer(wsi);
 
@@ -376,6 +444,10 @@ lws_ssl_capable_write(struct lws *wsi, unsigned char *buf, int len)
 			lws_set_blocking_send(wsi);
 		return LWS_SSL_CAPABLE_MORE_SERVICE;
 	}
+		lwsl_err("%s failed: %s\n",__func__,
+				 ERR_error_string(lws_ssl_get_error(wsi, 0), NULL));
+			lws_decode_ssl_error();
+
 
 	return LWS_SSL_CAPABLE_ERROR;
 }
@@ -417,6 +489,7 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 #if !defined(USE_WOLFSSL) && !defined(LWS_USE_POLARSSL) && !defined(LWS_USE_MBEDTLS)
 	BIO *bio;
 #endif
+        char buf[256];
 
 	if (!LWS_SSL_ENABLED(wsi->vhost))
 		return 0;
@@ -478,7 +551,7 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 		}
 
 		SSL_set_ex_data(wsi->ssl,
-			openssl_websocket_private_data_index, wsi->vhost);
+			openssl_websocket_private_data_index, wsi);
 
 		SSL_set_fd(wsi->ssl, accept_fd);
 #endif
@@ -613,8 +686,6 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 			goto accepted;
 
 		m = lws_ssl_get_error(wsi, n);
-		lwsl_debug("SSL_accept failed %d / %s\n",
-			   m, ERR_error_string(m, NULL));
 go_again:
 		if (m == SSL_ERROR_WANT_READ) {
 			if (lws_change_pollfd(wsi, 0, LWS_POLLIN)) {
@@ -633,9 +704,9 @@ go_again:
 
 			break;
 		}
-		lwsl_err("SSL_accept failed skt %u: %s\n",
-			   wsi->sock, ERR_error_string(m, NULL));
 
+                lwsl_err("SSL_accept failed socket %u: %s\n", wsi->sock,
+                         lws_ssl_get_error_string(m, n, buf, sizeof(buf)));
 		lws_ssl_elaborate_error();
 		goto fail;
 
@@ -690,12 +761,16 @@ lws_ssl_context_destroy(struct lws_context *context)
 #else
 #if defined(LWS_USE_MBEDTLS)
 #else
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_WOLFSSL)
+
+// after 1.1.0 no need
+#if (OPENSSL_VERSION_NUMBER <  0x10100000)
+// <= 1.0.1f = old api, 1.0.1g+ = new api
+#if (OPENSSL_VERSION_NUMBER <= 0x1000106f) || defined(USE_WOLFSSL)
 	ERR_remove_state(0);
 #else
-#if (OPENSSL_VERSION_NUMBER >= 0x10100005L) && \
-	!defined(LIBRESSL_VERSION_NUMBER) && \
-	!defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER >= 0x1010005f && \
+    !defined(LIBRESSL_VERSION_NUMBER) && \
+    !defined(OPENSSL_IS_BORINGSSL)
 	ERR_remove_thread_state();
 #else
 	ERR_remove_thread_state(NULL);
@@ -704,6 +779,8 @@ lws_ssl_context_destroy(struct lws_context *context)
 	ERR_free_strings();
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
+#endif
+
 #endif
 #endif
 }

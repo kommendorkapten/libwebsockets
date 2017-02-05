@@ -7,7 +7,9 @@ var group__vhost_mounts =
       [ "value", "structlws__protocol__vhost__options.html#a0640a92513c70ee6b9b295a9ad1658e7", null ]
     ] ],
     [ "lws_http_mount", "structlws__http__mount.html", [
+      [ "_unused", "structlws__http__mount.html#a78d58848eed7b544ae83f719abdbe4b6", null ],
       [ "auth_mask", "structlws__http__mount.html#a614364c770b0bd4db464ad65cddab477", null ],
+      [ "basic_auth_login_file", "structlws__http__mount.html#a2f6c7dbc2d714b7259c67b7744d4ff98", null ],
       [ "cache_intermediaries", "structlws__http__mount.html#aabec1a326780aafe11b977000983be0c", null ],
       [ "cache_max_age", "structlws__http__mount.html#a4283e30ea89d27ae7d061ad760d1d146", null ],
       [ "cache_reusable", "structlws__http__mount.html#a8316dd183ffbef50419a5a4968d35d84", null ],

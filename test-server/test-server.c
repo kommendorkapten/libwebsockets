@@ -14,7 +14,7 @@
  * all without asking permission.
  *
  * The test apps are intended to be adapted for use in your code, which
- * may be proprietary.  So unlike the library itself, they are licensed
+ * may be proprietary.	So unlike the library itself, they are licensed
  * Public Domain.
  */
 
@@ -122,7 +122,7 @@ static struct lws_protocols protocols[] = {
 };
 
 
-/* this shows how to override the lws file operations.  You don't need
+/* this shows how to override the lws file operations.	You don't need
  * to do any of this unless you have a reason (eg, want to serve
  * compressed files without decompressing the whole archive)
  */
@@ -169,22 +169,23 @@ static struct option options[] = {
 	{ "port",	required_argument,	NULL, 'p' },
 	{ "ssl",	no_argument,		NULL, 's' },
 	{ "allow-non-ssl",	no_argument,	NULL, 'a' },
-	{ "interface",  required_argument,	NULL, 'i' },
-	{ "closetest",  no_argument,		NULL, 'c' },
+	{ "interface",	required_argument,	NULL, 'i' },
+	{ "closetest",	no_argument,		NULL, 'c' },
 	{ "ssl-cert",  required_argument,	NULL, 'C' },
 	{ "ssl-key",  required_argument,	NULL, 'K' },
 	{ "ssl-ca",  required_argument,		NULL, 'A' },
 #if defined(LWS_OPENSSL_SUPPORT)
-	{ "ssl-verify-client",  no_argument,		NULL, 'v' },
+	{ "ssl-verify-client",	no_argument,		NULL, 'v' },
 #if defined(LWS_HAVE_SSL_CTX_set1_param)
 	{ "ssl-crl",  required_argument,		NULL, 'R' },
 #endif
 #endif
 	{ "libev",  no_argument,		NULL, 'e' },
 #ifndef LWS_NO_DAEMONIZE
-	{ "daemonize", 	no_argument,		NULL, 'D' },
+	{ "daemonize",	no_argument,		NULL, 'D' },
 #endif
 	{ "resource_path", required_argument,	NULL, 'r' },
+	{ "pingpong-secs", required_argument,	NULL, 'P' },
 	{ NULL, 0, 0, 0 }
 };
 
@@ -199,13 +200,19 @@ int main(int argc, char **argv)
 	char ca_path[1024] = "";
 	int uid = -1, gid = -1;
 	int use_ssl = 0;
+	int pp_secs = 0;
 	int opts = 0;
 	int n = 0;
 #ifndef _WIN32
+/* LOG_PERROR is not POSIX standard, and may not be portable */
+#ifdef __sun
+	int syslog_options = LOG_PID;
+#else	     
 	int syslog_options = LOG_PID | LOG_PERROR;
 #endif
+#endif
 #ifndef LWS_NO_DAEMONIZE
- 	int daemonize = 0;
+	int daemonize = 0;
 #endif
 
 	/*
@@ -216,7 +223,7 @@ int main(int argc, char **argv)
 	info.port = 7681;
 
 	while (n >= 0) {
-		n = getopt_long(argc, argv, "eci:hsap:d:Dr:C:K:A:R:vu:g:", options, NULL);
+		n = getopt_long(argc, argv, "eci:hsap:d:Dr:C:K:A:R:vu:g:P:", options, NULL);
 		if (n < 0)
 			continue;
 		switch (n) {
@@ -226,7 +233,7 @@ int main(int argc, char **argv)
 #ifndef LWS_NO_DAEMONIZE
 		case 'D':
 			daemonize = 1;
-			#ifndef _WIN32
+			#if !defined(_WIN32) && !defined(__sun)
 			syslog_options &= ~LOG_PERROR;
 			#endif
 			break;
@@ -275,6 +282,10 @@ int main(int argc, char **argv)
 		case 'A':
 			strncpy(ca_path, optarg, sizeof(ca_path) - 1);
 			ca_path[sizeof(ca_path) - 1] = '\0';
+			break;
+		case 'P':
+			pp_secs = atoi(optarg);
+			lwsl_notice("Setting pingpong interval to %d\n", pp_secs);
 			break;
 #if defined(LWS_OPENSSL_SUPPORT)
 		case 'v':
@@ -344,6 +355,7 @@ int main(int argc, char **argv)
 	info.protocols = protocols;
 	info.ssl_cert_filepath = NULL;
 	info.ssl_private_key_filepath = NULL;
+	info.ws_ping_pong_interval = pp_secs;
 
 	if (use_ssl) {
 		if (strlen(resource_path) > sizeof(cert_path) - 32) {
@@ -396,7 +408,7 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	/* this shows how to override the lws file operations.  You don't need
+	/* this shows how to override the lws file operations.	You don't need
 	 * to do any of this unless you have a reason (eg, want to serve
 	 * compressed files without decompressing the whole archive)
 	 */
@@ -406,6 +418,9 @@ int main(int argc, char **argv)
 	lws_get_fops(context)->open = test_server_fops_open;
 
 	n = 0;
+#ifdef EXTERNAL_POLL
+	int ms_1sec = 0;
+#endif
 	while (n >= 0 && !force_exit) {
 		struct timeval tv;
 
@@ -434,7 +449,7 @@ int main(int argc, char **argv)
 		if (n < 0)
 			continue;
 
-		if (n)
+		if (n) {
 			for (n = 0; n < count_pollfds; n++)
 				if (pollfds[n].revents)
 					/*
@@ -445,6 +460,20 @@ int main(int argc, char **argv)
 					if (lws_service_fd(context,
 								  &pollfds[n]) < 0)
 						goto done;
+
+			/* if needed, force-service wsis that may not have read all input */
+			while (!lws_service_adjust_timeout(context, 1, 0)) {
+				lwsl_notice("extpoll doing forced service!\n");
+				lws_service_tsi(context, -1, 0);
+			}
+		} else {
+			/* no revents, but before polling again, make lws check for any timeouts */
+			if (ms - ms_1sec > 1000) {
+				lwsl_notice("1 per sec\n");
+				lws_service_fd(context, NULL);
+				ms_1sec = ms;
+			}
+		}
 #else
 		/*
 		 * If libwebsockets sockets are all we care about,

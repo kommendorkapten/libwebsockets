@@ -3,20 +3,20 @@
  *
  * Copyright (C) 2010-2016 Andy Green <andy@warmcat.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation:
- * version 2.1 of the License.
+ *  This library is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU Lesser General Public
+ *  License as published by the Free Software Foundation:
+ *  version 2.1 of the License.
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ *  This library is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA
+ *  You should have received a copy of the GNU Lesser General Public
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+ *  MA  02110-1301  USA
  */
 
 #include "private-libwebsockets.h"
@@ -37,6 +37,9 @@ static const char * const paths_global[] = {
 	"global.server-string",
 	"global.plugin-dir",
 	"global.ws-pingpong-secs",
+	"global.timeout-secs",
+	"global.reject-service-keywords[].*",
+	"global.reject-service-keywords[]",
 };
 
 enum lejp_global_paths {
@@ -47,6 +50,9 @@ enum lejp_global_paths {
 	LEJPGP_SERVER_STRING,
 	LEJPGP_PLUGIN_DIR,
 	LWJPGP_PINGPONG_SECS,
+	LWJPGP_TIMEOUT_SECS,
+	LWJPGP_REJECT_SERVICE_KEYWORDS_NAME,
+	LWJPGP_REJECT_SERVICE_KEYWORDS
 };
 
 static const char * const paths_vhosts[] = {
@@ -71,6 +77,7 @@ static const char * const paths_vhosts[] = {
 	"vhosts[].mounts[].cache-max-age",
 	"vhosts[].mounts[].cache-reuse",
 	"vhosts[].mounts[].cache-revalidate",
+	"vhosts[].mounts[].basic-auth",
 	"vhosts[].mounts[].cache-intermediaries",
 	"vhosts[].mounts[].extra-mimetypes.*",
 	"vhosts[].mounts[].interpret.*",
@@ -112,6 +119,7 @@ enum lejp_vhost_paths {
 	LEJPVP_MOUNT_CACHE_MAX_AGE,
 	LEJPVP_MOUNT_CACHE_REUSE,
 	LEJPVP_MOUNT_CACHE_REVALIDATE,
+	LEJPVP_MOUNT_BASIC_AUTH,
 	LEJPVP_MOUNT_CACHE_INTERMEDIARIES,
 	LEJPVP_MOUNT_EXTRA_MIMETYPES,
 	LEJPVP_MOUNT_INTERPRET,
@@ -209,10 +217,30 @@ static char
 lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 {
 	struct jpargs *a = (struct jpargs *)ctx->user;
+	struct lws_protocol_vhost_options *rej;
+	int n;
 
 	/* we only match on the prepared path strings */
 	if (!(reason & LEJP_FLAG_CB_IS_VALUE) || !ctx->path_match)
 		return 0;
+
+	/* this catches, eg, vhosts[].headers[].xxx */
+	if (reason == LEJPCB_VAL_STR_END &&
+	    ctx->path_match == LWJPGP_REJECT_SERVICE_KEYWORDS_NAME + 1) {
+		rej = lwsws_align(a);
+		a->p += sizeof(*rej);
+
+		n = lejp_get_wildcard(ctx, 0, a->p, a->end - a->p);
+		rej->next = a->info->reject_service_keywords;
+		a->info->reject_service_keywords = rej;
+		rej->name = a->p;
+		 lwsl_notice("  adding rej %s=%s\n", a->p, ctx->buf);
+		a->p += n - 1;
+		*(a->p++) = '\0';
+		rej->value = a->p;
+		rej->options = NULL;
+		goto dostring;
+	}
 
 	switch (ctx->path_match - 1) {
 	case LEJPGP_UID:
@@ -243,11 +271,16 @@ lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 		a->info->ws_ping_pong_interval = atoi(ctx->buf);
 		return 0;
 
+	case LWJPGP_TIMEOUT_SECS:
+		a->info->timeout_secs = atoi(ctx->buf);
+		return 0;
+
 	default:
 		return 0;
 	}
 
-	a->p += snprintf(a->p, a->end - a->p, "%s", ctx->buf);
+dostring:
+	a->p += lws_snprintf(a->p, a->end - a->p, "%s", ctx->buf);
 	*(a->p)++ = '\0';
 
 	return 0;
@@ -496,6 +529,9 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 	case LEJPVP_MOUNT_CACHE_INTERMEDIARIES:
 		a->m.cache_intermediaries = arg_to_bool(ctx->buf);;
 		return 0;
+	case LEJPVP_MOUNT_BASIC_AUTH:
+		a->m.basic_auth_login_file = a->p;
+		break;
 	case LEJPVP_CGI_TIMEOUT:
 		a->m.cgi_timeout = atoi(ctx->buf);
 		return 0;
@@ -521,8 +557,8 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 		a->p += n;
 		mp_cgienv->value = a->p;
 		mp_cgienv->options = NULL;
-		lwsl_notice("    adding pmo / cgi-env '%s' = '%s'\n", mp_cgienv->name,
-				mp_cgienv->value);
+		//lwsl_notice("    adding pmo / cgi-env '%s' = '%s'\n", mp_cgienv->name,
+		//		mp_cgienv->value);
 		goto dostring;
 
 	case LEJPVP_PROTOCOL_NAME_OPT:
@@ -613,11 +649,11 @@ dostring:
 			n = a->end - a->p;
 		strncpy(a->p, p, n);
 		a->p += n;
-		a->p += snprintf(a->p, a->end - a->p, "%s", LWS_INSTALL_DATADIR);
+		a->p += lws_snprintf(a->p, a->end - a->p, "%s", LWS_INSTALL_DATADIR);
 		p += n + strlen(ESC_INSTALL_DATADIR);
 	}
 
-	a->p += snprintf(a->p, a->end - a->p, "%s", p);
+	a->p += lws_snprintf(a->p, a->end - a->p, "%s", p);
 	*(a->p)++ = '\0';
 
 	return 0;
@@ -673,10 +709,13 @@ lwsws_get_config_d(void *user, const char *d, const char * const *paths,
 	uv_dirent_t dent;
 	uv_fs_t req;
 	char path[256];
-	int ret = 0;
+	int ret = 0, ir;
 	uv_loop_t loop;
 
-	uv_loop_init(&loop);
+	ir = uv_loop_init(&loop);
+	if (ir) {
+		lwsl_err("%s: loop init failed %d\n", __func__, ir);
+	}
 
 	if (!uv_fs_scandir(&loop, &req, d, 0, NULL)) {
 		lwsl_err("Scandir on %s failed\n", d);
@@ -684,7 +723,7 @@ lwsws_get_config_d(void *user, const char *d, const char * const *paths,
 	}
 
 	while (uv_fs_scandir_next(&req, &dent) != UV_EOF) {
-		snprintf(path, sizeof(path) - 1, "%s/%s", d, dent.name);
+		lws_snprintf(path, sizeof(path) - 1, "%s/%s", d, dent.name);
 		ret = lwsws_get_config(user, path, paths, count_paths, cb);
 		if (ret)
 			goto bail;
@@ -724,7 +763,7 @@ lwsws_get_config_d(void *user, const char *d, const char * const *paths,
 	}
 
 	for (i = 0; i < n; i++) {
-		snprintf(path, sizeof(path) - 1, "%s/%s", d,
+		lws_snprintf(path, sizeof(path) - 1, "%s/%s", d,
 			 namelist[i]->d_name);
 		ret = lwsws_get_config(user, path, paths, count_paths, cb);
 		if (ret) {
@@ -773,11 +812,11 @@ lwsws_get_config_globals(struct lws_context_creation_info *info, const char *d,
 		old++;
 	}
 
-	snprintf(dd, sizeof(dd) - 1, "%s/conf", d);
+	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf", d);
 	if (lwsws_get_config(&a, dd, paths_global,
 			     ARRAY_SIZE(paths_global), lejp_globals_cb) > 1)
 		return 1;
-	snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
+	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
 	if (lwsws_get_config_d(&a, dd, paths_global,
 			       ARRAY_SIZE(paths_global), lejp_globals_cb) > 1)
 		return 1;
@@ -808,11 +847,11 @@ lwsws_get_config_vhosts(struct lws_context *context,
 	a.protocols = info->protocols;
 	a.extensions = info->extensions;
 
-	snprintf(dd, sizeof(dd) - 1, "%s/conf", d);
+	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf", d);
 	if (lwsws_get_config(&a, dd, paths_vhosts,
 			     ARRAY_SIZE(paths_vhosts), lejp_vhosts_cb) > 1)
 		return 1;
-	snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
+	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
 	if (lwsws_get_config_d(&a, dd, paths_vhosts,
 			       ARRAY_SIZE(paths_vhosts), lejp_vhosts_cb) > 1)
 		return 1;
@@ -825,7 +864,7 @@ lwsws_get_config_vhosts(struct lws_context *context,
 		return 1;
 	}
 
-	lws_finalize_startup(context);
+//	lws_finalize_startup(context);
 
 	return 0;
 }
